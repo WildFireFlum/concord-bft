@@ -1,0 +1,94 @@
+name: Build
+on: [push, pull_request]
+
+env:
+  cc: clang
+  c++: clang++
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-18.04
+    outputs:
+      err_output: ${{ steps.prepare_err_artifacts.outputs.test}}
+    strategy:
+        fail-fast: false
+        matrix:
+            build_type:
+                - Debug
+                #- Release
+                #- "-DCMAKE_BUILD_TYPE=Debug -DBUILD_COMM_TCP_TLS=TRUE"
+            tls:
+              - TRUE
+              #- FALSE
+            use_s3_obj_store:
+                - ON
+                #- "-DUSE_S3_OBJECT_STORE=OFF"
+    steps:
+        - name: Cleanup pre-installed tools
+          run: |
+            # This is a fix for https://github.com/actions/virtual-environments/issues/1918
+            sudo rm -rf /usr/share/dotnet
+            sudo rm -rf /opt/ghc
+            sudo rm -rf "/usr/local/share/boost"
+            sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        - name: Checkout
+          uses: actions/checkout@v2
+        - name: Create artifact directory
+          run: mkdir -p ${{ github.workspace }}/artifact
+        #- name: Configure core dump location
+        #  run: |
+            # Uncomment the line below to enable core dump collection
+            # echo "/concord-bft/build/cores/core.%e.%p" | sudo tee /proc/sys/kernel/core_pattern
+            # Uncomment this is you want to login into the running session.
+            # Please note that the build will block on this step.
+            # Refer to https://github.com/marketplace/actions/debugging-with-tmate
+        #- name: Setup tmate session
+        #  uses: mxschmitt/action-tmate@v2
+        # run:
+        #               script -q -e -c "make pull"
+      #              sudo df -h
+      #              script -q -e -c "make TARGET=skvbc_replica build \
+      #                              ${{ matrix.compiler}} \
+      #                              CONCORD_BFT_CMAKE_FLAGS=\"\
+      #                              -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+      #                              -DBUILD_COMM_TCP_TLS=${{ matrix.tls }}
+      #                              -DBUILD_TESTING=ON \
+      #                              -DBUILD_COMM_TCP_PLAIN=FALSE \
+      #                              -DCMAKE_CXX_FLAGS_Debug='-g' \
+      #                              -DUSE_LOG4CPP=TRUE \
+      #                              -DBUILD_ROCKSDB_STORAGE=TRUE \
+      #                              -DUSE_S3_OBJECT_STORE=${{ matrix.use_s3_obj_store }} \
+      #                              -DUSE_OPENTRACING=ON \
+      #                              -DOMIT_TEST_OUTPUT=OFF\
+      #                              -DKEEP_APOLLO_LOGS=TRUE\
+      #                              -DUSE_FAKE_CLOCK_IN_TIME_SERVICE=TRUE\" "\
+        - name: Build
+          run: |
+              script -q -e -c "echo wat > ./wat.txt"
+              sudo df -h
+        - name: Prepare artifacts
+          if: failure()
+          run: |
+            sudo chown -R ${USER}:${GROUP} ${PWD}/build
+            tar -czvf ${{ github.workspace }}/artifact/logs.tar.gz ./build/tests/apollo/logs
+            du -h ${{ github.workspace }}/artifact
+            sudo df -h
+        - name: Upload binaries
+          uses: actions/upload-artifact@v2
+          if: success()
+          with:
+            #name: replica-${{ matrix.compiler }}-${{ matrix.ci_build_type }}-${{ github.sha }}
+            name: skvbc_replica_${{matrix.build_type}}_tls_${{ matrix.tls }}_s3${{ matrix.use_s3_obj_store }}
+            path: ./wat.txt
+            #path: ./tests/simpleKVBC/TesterReplica/skvbc_replica
+          #/home/runner/work/concord-bft/concord-bft/.github/workflows/test_clang_debug.yml
+        - name: Check files
+          if: success()
+          run: ls -l /home/runner/work/concord-bft/concord-bft/.github/workflows/
+
+  call-test-debug-tls-s3:
+    needs: build
+    uses: ./.github/workflows/test_clang_debug.yml
+    with:
+      binary: skvbc_replica_Debug_tls_TRUE_s3_ON
