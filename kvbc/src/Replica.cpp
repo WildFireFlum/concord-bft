@@ -571,6 +571,7 @@ Replica::Replica(ICommunication *comm,
         throw std::invalid_argument{msg};
       }
     }
+    // TODO: Allow blockchains with different storage layers
     m_kvBlockchain.emplace(
         storage::rocksdb::NativeClient::fromIDBClient(m_dbSet.dataDBClient), linkStChain, kvbc_categories);
     m_kvBlockchain->setAggregator(aggregator);
