@@ -84,6 +84,9 @@ KEY_FILE_PREFIX = "replica_keys_"
 BFT_CLIENT_TYPE = bft_client.TcpTlsClient if os.environ.get('BUILD_COMM_TCP_TLS', "").lower() == "true" \
                                           else bft_client.UdpClient
 
+#TODO: delete this line
+BFT_CLIENT_TYPE = bft_client.UdpClient
+
 # For better performance, we Would like to keep the next constant as minimal as possible.
 # If you need more clients, increase with caution.
 # Reserved clients (RESERVED_CLIENTS_QUOTA) are not part of NUM_CLIENTS
@@ -311,7 +314,11 @@ class BftTestNetwork:
 
     @classmethod
     def new(cls, config, background_nursery, client_factory=None, with_cre=False):
-        builddir = os.path.abspath("../../build")
+        root_dir = Path(os.getenv("CONCORD_BFT_ROOT", "../../")).absolute()
+        assert root_dir.exists(), f"Root directory {root_dir} doesn't exist, " \
+                                  f"please set the CONCORD_BFT_ROOT environment variable correctly"
+        builddir = str(root_dir / "build")
+
         toolsdir = os.path.join(builddir, "tools")
         testdir = tempfile.mkdtemp()
         certdir = tempfile.mkdtemp()
@@ -339,8 +346,12 @@ class BftTestNetwork:
         )
         bft_network.with_cre = with_cre
         # Copy logging.properties file
-        shutil.copy(os.path.abspath("../simpleKVBC/scripts/logging.properties"), testdir)
+        def copy_test_files():
+            shutil.copy(str(root_dir / "tests" / "simpleKVBC" / "scripts" / "logging.properties"), testdir)
+            shutil.copy(str(root_dir / "scripts" / "linux" / "create_tls_certs.sh"),
+                        Path(builddir) / 'tests' / 'simpleTest' / 'scripts' / 'create_tls_certs.sh')
 
+        copy_test_files()
         log.log_message(message_type=f"Running test in {bft_network.testdir}", build_dir=builddir, tools_dir=toolsdir,
                         cert_dir=certdir)
 
