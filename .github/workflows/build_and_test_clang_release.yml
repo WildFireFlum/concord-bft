@@ -16,6 +16,7 @@ jobs:
             build_type: [RELEASE]
             use_s3_obj_store: [OFF]
             tls_comm: [FALSE]
+            test_group: ["group_3"]
             exclude:
               - compiler: {cpp: clang++, c: clang}
                 build_type: DEBUG
@@ -71,119 +72,40 @@ jobs:
               -DUSE_OPENTRACING=ON -DOMIT_TEST_OUTPUT=OFF \
               -DKEEP_APOLLO_LOGS=TRUE -DBUILD_COMM_TCP_TLS=${{ matrix.tls_comm }} \
               -DUSE_FAKE_CLOCK_IN_TIME_SERVICE=TRUE"
-              #export TARGET="skvbc_replica GenerateConcordKeys metric_server"
-              export TARGET="GenerateConcordKeys"
+              export TARGET=logging
               script -q -e -c "make build 2>&1 | tee ${{ github.workspace }}/artifact/build_stdout.txt"
-        - name: Prepare Binaries
+        - name: Run Test Group
           run: |
-              GZIP=-9 tar -czvf ${{ github.workspace }}/binaries.tar.gz  build/tools/GenerateConcordKeys
-              #GZIP=-9 tar -czvf ${{ github.workspace }}/binaries.tar.gz  build/tools/GenerateConcordKeys build/util/test/metric_server build/tests/simpleKVBC/TesterReplica/skvbc_replica
-        - name: Upload binaries
-          uses: actions/upload-artifact@v2
-          if: success()
-          with:
-            name: binaries_${{matrix.build_type}}_tls_${{ matrix.tls_comm }}_s3_${{ matrix.use_s3_obj_store }}_${{ matrix.compiler.c }}.tar.gz
-            path: ${{ github.workspace }}/binaries.tar.gz
-            if-no-files-found: error
-        - name: Upload artifacts
-          uses: actions/upload-artifact@v2
+            export GROUP_TIMEOUT=35
+            export TEST_GROUP=${{ matrix.test_group }}
+            chmod u+x ./run_test_group.sh 
+            echo "Running test group $TEST_GROUP with timeout of $GROUP_TIMEOUT minutes" 
+            script -q -e -c "timeout --foreground --signal=SIGKILL 35m ./run_test_group.sh $TEST_GROUP"
+        - name: Prepare artifacts
           if: failure()
+          run: |
+            sudo chown -R ${USER}:${GROUP} ${PWD}/build
+            GZIP=-9 tar -czvf ${{ github.workspace }}/artifact/logs.tar.gz ./build/tests/apollo/logs
+            du -h ${{ github.workspace }}/artifact
+            sudo df -h
+        - name: Check ERROR/FATAL logs
+          if: always()
+          run: |
+            ./.github/success_action_if_err_logs_exist.sh ./build/tests/apollo/logs
+            echo "file_count=$(find ./build/tests/apollo/logs -name ReplicaErrorLogs.txt | wc -l)" >> $GITHUB_ENV
+        - name: Prepare error artifacts
+          id: prepare_err_artifacts
+          if: ${{ env.file_count > 0 }}
+          run: |
+            sudo chown -R ${USER}:${GROUP} ${PWD}/build
+            tar -czvf ${{ github.workspace }}/artifact/logs.tar.gz ./build/tests/apollo/logs
+            du -h ${{ github.workspace }}/artifact
+            sudo df -h
+            echo "::set-output name=test::success"
+        - name: Upload error artifacts
+          uses: actions/upload-artifact@v2
+          if: ${{ env.file_count > 0 }}
           with:
-            name: failed_build_artifacts-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ github.sha }}
+            name: apollo-logs-${{matrix.build_type}}-tls_${{ matrix.tls_comm }}-s3_${{ matrix.use_s3_obj_store }}-${{ matrix.compiler.cpp }}
             path: ${{ github.workspace }}/artifact/
 
-  test:
-    needs: build
-    name: Test
-    runs-on: ubuntu-18.04
-    outputs:
-      err_output: ${{ steps.prepare_err_artifacts.outputs.test}}
-    strategy:
-      fail-fast: false
-      matrix:
-        compiler: [ { cpp: clang++, c: clang } ]
-        build_type: [ RELEASE ]
-        use_s3_obj_store: [ OFF ]
-        tls_comm: [ FALSE ]
-        test_group: [group_1]
-      #matrix:
-      #  compiler: [ { cpp: clang++, c: clang } ]
-      #  build_type: [ RELEASE, DEBUG ]
-      #  use_s3_obj_store: [ OFF, ON ]
-      #  tls_comm: [ FALSE, TRUE ]
-      #  test_group: [1, 2, 3]
-      #  exclude:
-      #    - compiler: { cpp: clang++, c: clang }
-      #      build_type: DEBUG
-      #      use_s3_obj_store: ON
-      #      tls_comm: TRUE
-      #      test_group: [1, 2, 3]
-      #    - compiler: { cpp: clang++, c: clang }
-      #      build_type: DEBUG
-      #      use_s3_obj_store: OFF
-      #      tls_comm: TRUE
-      #      test_group: [1, 2, 3]
-
-
-    steps:
-      - name: Cleanup pre-installed tools
-        run: |
-          # This is a fix for https://github.com/actions/virtual-environments/issues/1918
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-      - name: Checkout
-        uses: actions/checkout@v2
-      - name: Create artifact directory
-        run: mkdir -p ${{ github.workspace }}/artifact
-      - uses: actions/download-artifact@v3
-        with:
-          name: binaries_${{matrix.build_type}}_tls_${{ matrix.tls_comm }}_s3_${{ matrix.use_s3_obj_store }}_${{ matrix.compiler.c }}.tar.gz
-          path: ${{ github.workspace }}
-      - name: Extract artifacts
-        run: |
-          ls -l ${{ github.workspace }}
-          tar -zxvf binaries.tar.gz -C ${{ github.workspace }}
-          ls -l ${{ github.workspace }}/build
-      - name: Generate build directory
-        run: |
-          script -q -e -c "make gen_cmake"
-      - name: Run Test Group
-        run: |
-          export GROUP_TIMEOUT=35
-          export TEST_GROUP=${{ matrix.test_group }}
-          chmod u+x ./run_test_group.sh
-          #chmod u+x build/tests/simpleKVBC/TesterReplica/skvbc_replica ./run_test_group.sh 
-          echo "Running test group $TEST_GROUP with timeout of $GROUP_TIMEOUT minutes" 
-          script -q -e -c "timeout --signal=SIGKILL 35m ./run_test_group.sh $TEST_GROUP"
-          export TEST_GROUP_EXIT_CODE=$?
-          echo "Tests exit code: $TEST_GROUP_EXIT_CODE"
-          exit TEST_GROUP_EXIT_CODE
-      - name: Prepare artifacts
-        if: failure()
-        run: |
-          sudo chown -R ${USER}:${GROUP} ${PWD}/build
-          GZIP=-9 tar -czvf ${{ github.workspace }}/artifact/logs.tar.gz ./build/tests/apollo/logs
-          du -h ${{ github.workspace }}/artifact
-          sudo df -h
-      - name: Check ERROR/FATAL logs
-        if: always()
-        run: |
-          ./.github/success_action_if_err_logs_exist.sh ./build/tests/apollo/logs
-          echo "file_count=$(find ./build/tests/apollo/logs -name ReplicaErrorLogs.txt | wc -l)" >> $GITHUB_ENV
-      - name: Prepare error artifacts
-        id: prepare_err_artifacts
-        if: ${{ env.file_count > 0 }}
-        run: |
-          sudo chown -R ${USER}:${GROUP} ${PWD}/build
-          tar -czvf ${{ github.workspace }}/artifact/logs.tar.gz ./build/tests/apollo/logs
-          du -h ${{ github.workspace }}/artifact
-          sudo df -h
-          echo "::set-output name=test::success"
-      - name: Upload error artifacts
-        uses: actions/upload-artifact@v2
-        if: ${{ env.file_count > 0 }}
-        with:
-          name: apollo-logs-${{matrix.build_type}}-tls_${{ matrix.tls_comm }}-s3_${{ matrix.use_s3_obj_store }}-${{ matrix.compiler.cpp }}
-          path: ${{ github.workspace }}/artifact/
