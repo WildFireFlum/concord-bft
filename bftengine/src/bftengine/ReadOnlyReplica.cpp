@@ -12,6 +12,7 @@
 #include <bftengine/Replica.hpp>
 #include <optional>
 #include <functional>
+#include <bitset>
 #include <messages/StateTransferMsg.hpp>
 #include "ReadOnlyReplica.hpp"
 #include "MsgHandlersRegistrator.hpp"
@@ -74,11 +75,13 @@ ReadOnlyReplica::ReadOnlyReplica(const ReplicaConfig &config,
 
 void ReadOnlyReplica::start() {
   ReplicaForStateTransfer::start();
-  askForCheckpointMsgTimer_ = timers_.add(std::chrono::seconds(5),  // TODO [TK] config
-                                          Timers::Timer::RECURRING,
-                                          [this](Timers::Handle) {
-                                            if (!this->isCollectingState()) sendAskForCheckpointMsg();
-                                          });
+  size_t sendAskForCheckpointMsgPeriodSec = config_.get("concord.bft.ro.sendAskForCheckpointMsgPeriodSec", 30);
+  askForCheckpointMsgTimer_ = timers_.add(
+      std::chrono::seconds(sendAskForCheckpointMsgPeriodSec), Timers::Timer::RECURRING, [this](Timers::Handle) {
+        if (!this->isCollectingState()) {
+          sendAskForCheckpointMsg();
+        }
+      });
   msgsCommunicator_->startMsgsProcessing(config_.replicaId);
 }
 
@@ -127,8 +130,9 @@ void ReadOnlyReplica::onMessage<CheckpointMsg>(CheckpointMsg *msg) {
                  msg->size(),
                  msg->isStableState(),
                  msg->state(),
-                 msg->digestOfState(),
-                 msg->otherDigest()));
+                 msg->stateDigest(),
+                 msg->reservedPagesDigest(),
+                 msg->rvbDataDigest()));
 
   // Reconfiguration cmd block is synced to RO replica via reserved pages
   EpochNum replicasLastKnownEpochVal = 0;
@@ -162,8 +166,9 @@ void ReadOnlyReplica::persistCheckpointDescriptor(const SeqNum &seqnum, const Ch
              KVLOG(m.second->seqNumber(),
                    m.second->epochNumber(),
                    m.second->state(),
-                   m.second->digestOfState(),
-                   m.second->otherDigest(),
+                   m.second->stateDigest(),
+                   m.second->reservedPagesDigest(),
+                   m.second->rvbDataDigest(),
                    m.second->idOfGeneratedReplica()));
   }
   DescriptorOfLastStableCheckpoint desc(ReplicaConfig::instance().getnumReplicas(), msgs);

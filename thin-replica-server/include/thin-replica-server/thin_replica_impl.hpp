@@ -28,6 +28,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <fstream>
 #include "Logger.hpp"
 #include "Metrics.hpp"
 
@@ -39,6 +40,7 @@
 #include "thin_replica.grpc.pb.h"
 #include "subscription_buffer.hpp"
 #include "trs_metrics.hpp"
+#include <util/filesystem.hpp>
 
 using google::protobuf::util::TimeUtil;
 using namespace std::chrono_literals;
@@ -67,6 +69,7 @@ struct ThinReplicaServerConfig {
   std::unordered_set<std::string> client_id_set;
   // the threshold after which metrics aggregator is updated
   const uint16_t update_metrics_aggregator_thresh;
+  const bool use_unified_certs = false;
   // the time duration the TRS waits before printing warning logs when
   // subscription status for live updates is not ok
   std::chrono::seconds no_live_subscription_warn_duration;
@@ -77,6 +80,7 @@ struct ThinReplicaServerConfig {
                           SubBufferList& subscriber_list_,
                           std::unordered_set<std::string>& client_id_set_,
                           const uint16_t update_metrics_aggregator_thresh_ = 100,
+                          bool use_unified_certs_ = false,
                           std::chrono::seconds no_live_subscription_warn_duration_ = kNoLiveSubscriptionWarnDuration)
       : is_insecure_trs(is_insecure_trs_),
         tls_trs_cert_path(tls_trs_cert_path_),
@@ -84,6 +88,7 @@ struct ThinReplicaServerConfig {
         subscriber_list(subscriber_list_),
         client_id_set(client_id_set_),
         update_metrics_aggregator_thresh(update_metrics_aggregator_thresh_),
+        use_unified_certs(use_unified_certs_),
         no_live_subscription_warn_duration(no_live_subscription_warn_duration_) {}
 
  private:
@@ -112,6 +117,9 @@ class ThinReplicaImpl {
   const std::string kCorrelationIdTag = "cid";
   // last timestamp when subscription status for live updates was not ok
   std::optional<std::chrono::steady_clock::time_point> last_failed_subscribe_status_time;
+
+  // Max Subject length in certificates should be 555 bytes with ascii characters
+  static const uint16_t certSubjectLength{555};
 
  public:
   ThinReplicaImpl(std::unique_ptr<ThinReplicaServerConfig> config,
@@ -275,18 +283,18 @@ class ThinReplicaImpl {
     }
 
     // TRS metrics
-    ThinReplicaServerMetrics metrics_(stream_type, getClientId(context));
-    metrics_.setAggregator(aggregator_);
+    ThinReplicaServerMetrics metrics(stream_type, getClientId(context));
+    metrics.setAggregator(aggregator_);
     uint16_t update_aggregator_counter = 0;
-    metrics_.subscriber_list_size.Get().Set(config_->subscriber_list.Size());
+    metrics.subscriber_list_size.Get().Set(config_->subscriber_list.Size());
 
-#define CLEANUP_SUBSCRIPTION()                                                \
-  {                                                                           \
-    config_->subscriber_list.removeBuffer(live_updates);                      \
-    live_updates->removeAllUpdates();                                         \
-    live_updates->removeAllEventGroupUpdates();                               \
-    metrics_.subscriber_list_size.Get().Set(config_->subscriber_list.Size()); \
-    metrics_.updateAggregator();                                              \
+#define CLEANUP_SUBSCRIPTION()                                               \
+  {                                                                          \
+    config_->subscriber_list.removeBuffer(live_updates);                     \
+    live_updates->removeAllUpdates();                                        \
+    live_updates->removeAllEventGroupUpdates();                              \
+    metrics.subscriber_list_size.Get().Set(config_->subscriber_list.Size()); \
+    metrics.updateAggregator();                                              \
   }
 
     // If legacy event request then mark whether we need to transition into event groups
@@ -367,6 +375,10 @@ class ThinReplicaImpl {
     }
 
     if (request->has_events() && !is_event_group_transition) {
+      // Requested block ID received by the TRS must always be greater than zero.
+      // Currently TRS expects TRC to take care of requests with block ID zero
+      // TODO: Replace the assert with INVALID_ARGUMENT error thrown when block ID zero is requested
+      ConcordAssertGT(start_block_id, 0);
       try {
         syncAndSend<ServerContextT, ServerWriterT, DataT>(context, start_block_id, live_updates, stream, kvb_filter);
       } catch (concord::kvbc::NoLegacyEvents& error) {
@@ -394,7 +406,7 @@ class ThinReplicaImpl {
       SubUpdate update;
       try {
         while (!context->IsCancelled() && !is_event_group_transition) {
-          metrics_.queue_size.Get().Set(live_updates->Size());
+          metrics.queue_size.Get().Set(live_updates->Size());
           bool is_update_available = false;
           is_update_available = live_updates->TryPop(update, kWaitForUpdateTimeout);
           if (not is_update_available) {
@@ -424,9 +436,9 @@ class ThinReplicaImpl {
             LOG_DEBUG(logger_, "Live updates send hash");
             sendHash(stream, update.block_id, kvb_filter->hashUpdate(filtered_update));
           }
-          metrics_.last_sent_block_id.Get().Set(update.block_id);
+          metrics.last_sent_block_id.Get().Set(update.block_id);
           if (++update_aggregator_counter == config_->update_metrics_aggregator_thresh) {
-            metrics_.updateAggregator();
+            metrics.updateAggregator();
             update_aggregator_counter = 0;
           }
         }
@@ -460,9 +472,11 @@ class ThinReplicaImpl {
       event_group_id = request->event_groups().event_group_id();
     }
 
+    // Requested event group ID must always be greater than 0
+    ConcordAssertGT(event_group_id, 0);
     try {
       syncAndSendEventGroups<ServerContextT, ServerWriterT, DataT>(
-          context, event_group_id, live_updates, stream, kvb_filter);
+          context, event_group_id, live_updates, stream, kvb_filter, metrics);
     } catch (StreamCancelled& error) {
       LOG_WARN(logger_, "StreamCancelled in syncAndSendEventGroups: " << error.what());
       CLEANUP_SUBSCRIPTION();
@@ -487,7 +501,7 @@ class ThinReplicaImpl {
     SubEventGroupUpdate sub_eg_update;
     try {
       while (not context->IsCancelled()) {
-        metrics_.queue_size.Get().Set(live_updates->SizeEventGroupQueue());
+        metrics.queue_size.Get().Set(live_updates->SizeEventGroupQueue());
         bool is_update_available = false;
         is_update_available = live_updates->TryPopEventGroup(sub_eg_update, kWaitForUpdateTimeout);
         if (not is_update_available) {
@@ -506,6 +520,7 @@ class ThinReplicaImpl {
         // Once in syncAndSendEventGroups() and once here. Do this only once.
         auto filtered_eg_update = kvb_filter->filterEventGroupUpdate(eg_update);
         if (!filtered_eg_update) {
+          metrics.num_skipped_event_groups++;
           continue;
         }
         // Overwrite event group ID in the filtered update to external event group ID
@@ -522,9 +537,9 @@ class ThinReplicaImpl {
 
         kvb_filter->setLastEgIdsRead(next_ext_eg_id, sub_eg_update.event_group_id);
 
-        metrics_.last_sent_event_group_id.Get().Set(filtered_eg_update.value().event_group_id);
+        metrics.last_sent_event_group_id.Get().Set(filtered_eg_update.value().event_group_id);
         if (++update_aggregator_counter == config_->update_metrics_aggregator_thresh) {
-          metrics_.updateAggregator();
+          metrics.updateAggregator();
           update_aggregator_counter = 0;
         }
       }
@@ -588,9 +603,20 @@ class ThinReplicaImpl {
       // Determine oldest event group available (pruning)
       auto first_eg_id = kvb_filter->oldestExternalEventGroupId();
       auto last_eg_id = kvb_filter->newestExternalEventGroupId();
-      if (request->event_groups().event_group_id() < first_eg_id || (last_eg_id && !first_eg_id)) {
+      // When handling requests after pruning, TRS must take into account the following two scenarios:
+      // 1. New event groups have been added for the participant
+      // 2. No new event group has been added for the participant
+      // For e.g., assume 1-10 event groups have been pruned (event group IDs here are external event group IDs)
+      // In scenario 1, assume one more event group has been added. Hence, first_eg_id is now 11, any request for eg
+      // ID < 11 is invalid due to pruning.
+      // In scenario 2, first_eg_id is set to 0 after pruning and has not yet updated
+      // as there are no new event groups for the participant. we must therefore check against last_eg_id (10) to
+      // identify whether the requested eg ID has been pruned. i.e., any requested eg ID <= 10 is invalid due to pruning
+      // iff first_eg_id == 0.
+      if (request->event_groups().event_group_id() < first_eg_id ||
+          (!first_eg_id && request->event_groups().event_group_id() <= last_eg_id)) {
         msg << "Event group ID " << request->event_groups().event_group_id() << " has been pruned."
-            << " First event_group_id is " << first_eg_id;
+            << " First event_group_id is " << first_eg_id << " and last event_group_id is " << last_eg_id;
         LOG_WARN(logger_, msg.str());
         return true;
       }
@@ -598,11 +624,10 @@ class ThinReplicaImpl {
     return false;
   }
 
-  // Parses the value of the OU field i.e., the client id from the subject
+  // Parses the value of given delimiter field i.e., the client id from the subject
   // string
-  static std::string parseClientIdFromSubject(const std::string& subject_str) {
-    std::string delim = "OU = ";
-    size_t start = subject_str.find(delim) + delim.length();
+  static std::string parseClientIdFromSubject(const std::string& subject_str, const std::string& delimiter) {
+    size_t start = subject_str.find(delimiter) + delimiter.length();
     size_t end = subject_str.find(',', start);
     std::string raw_str = subject_str.substr(start, end - start);
     size_t fstart = 0;
@@ -655,8 +680,10 @@ class ThinReplicaImpl {
     char* subj = X509_NAME_oneline(X509_get_subject_name(certificate), NULL, 0);
     std::string result(subj);
 
-    // parse the OU field i.e., the client_id from the certificate
-    std::string delim = "OU=";
+    LOG_DEBUG(logger_, "TRS Subject: " << result);
+    // parse the O field i.e., the client_id from the certificate when use_unified_certs is enabled
+    // else parse OU field
+    std::string delim = (config_->use_unified_certs) ? "O=" : "OU=";
     size_t start = result.find(delim) + delim.length();
     size_t end = result.find('/', start);
     client_id = result.substr(start, end - start);
@@ -668,9 +695,11 @@ class ThinReplicaImpl {
 
   static void getClientIdFromRootCert(logging::Logger logger_,
                                       const std::string& root_cert_path,
-                                      std::unordered_set<std::string>& cert_ou_field_set) {
+                                      std::unordered_set<std::string>& cert_ou_field_set,
+                                      bool use_unified_certs) {
     std::array<char, 128> buffer;
     std::string result;
+    std::string delimiter;
     // Openssl doesn't provide a method to fetch all the x509 certificates
     // directly from a bundled cert, due to the assumption of one certificate
     // per file. But for some reason openssl supports displaying multiple certs
@@ -684,11 +713,51 @@ class ThinReplicaImpl {
       LOG_ERROR(logger_, "Failed to read from root cert - popen() failed, error: " << strerror(errno));
       throw std::runtime_error("Failed to read from root cert - popen() failed!");
     }
+
+    delimiter = (use_unified_certs) ? "O = " : "OU = ";
+
     while (fgets(buffer.data(), buffer.size(), pipe_ptr.get()) != nullptr) {
       result = buffer.data();
-      // parse the OU i.e., the client id from the subject field
-      cert_ou_field_set.insert(parseClientIdFromSubject(result));
+      // parse the client id from the subject field
+      cert_ou_field_set.insert(parseClientIdFromSubject(result, delimiter));
     }
+  }
+
+  static void getClientIdSetFromRootCert(logging::Logger logger_,
+                                         const std::string& root_cert_path,
+                                         std::unordered_set<std::string>& cert_ou_field_set) {
+    for (auto& p : fs::recursive_directory_iterator(root_cert_path)) {
+      if ((p.path().filename().string()).compare("node.cert") == 0) {
+        getClientIdFromRootCert(logger_, p.path().string(), cert_ou_field_set, true);
+      }
+    }
+  }
+
+  static std::string getClientIdFromCertificate(const std::string& client_cert_path, bool use_unified_certs = false) {
+    std::array<char, certSubjectLength> buffer;
+    std::string client_id;
+    std::string delimiter;
+    // check if client cert can be opened
+    std::ifstream input_file(client_cert_path.c_str(), std::ios::in);
+
+    if (!input_file.is_open()) {
+      throw std::runtime_error("Could not open the input file at path (" + client_cert_path + ")");
+    }
+
+    // The cmd string is used to get the subject in the client cert.
+    const std::string cmd =
+        "openssl crl2pkcs7 -nocrl -certfile " + client_cert_path + " | openssl pkcs7 -print_certs -noout | grep .";
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+    if (!pipe) {
+      throw std::runtime_error("Failed to read subject fields from client cert - popen() failed!");
+    }
+
+    delimiter = (use_unified_certs) ? "O = " : "OU = ";
+    if (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+      // parse the client id from the subject field
+      client_id = parseClientIdFromSubject(buffer.data(), delimiter);
+    }
+    return client_id;
   }
 
  private:
@@ -934,7 +1003,8 @@ class ThinReplicaImpl {
                               kvbc::EventGroupId start,
                               std::shared_ptr<SubUpdateBuffer>& live_updates,
                               ServerWriterT* stream,
-                              std::shared_ptr<kvbc::KvbAppFilter>& kvb_filter) {
+                              std::shared_ptr<kvbc::KvbAppFilter>& kvb_filter,
+                              ThinReplicaServerMetrics& metrics) {
     auto start_ext_storage_eg_id = kvb_filter->oldestExternalEventGroupId();
     auto end_ext_storage_eg_id = kvb_filter->newestExternalEventGroupId();
     if (start < start_ext_storage_eg_id || (end_ext_storage_eg_id && !start_ext_storage_eg_id)) {
@@ -959,7 +1029,6 @@ class ThinReplicaImpl {
         logger_, context, stream, start, end_ext_storage_eg_id, kvb_filter);
 
     bool is_update_available = false;
-    int num_updates_filtered_out = 0;
     auto next_global_eg_id_to_read = kvb_filter->getLastEgIdsRead().second + 1;
     while (not is_update_available) {
       is_update_available = live_updates->waitForEventGroupUntilNonEmpty(kWaitForUpdateTimeout);
@@ -989,9 +1058,9 @@ class ThinReplicaImpl {
           SubEventGroupUpdate sub_eg_update;
           live_updates->PopEventGroup(sub_eg_update);
           LOG_DEBUG(logger_, "Sync dropping upon filtering " << sub_eg_update.event_group_id);
-          num_updates_filtered_out++;
           is_update_available = false;
           next_global_eg_id_to_read += 1;
+          metrics.num_skipped_event_groups++;
           continue;
         }
         // The next event group in the live update queue has events for this client.
@@ -1015,6 +1084,7 @@ class ThinReplicaImpl {
         auto filtered_eg_update = kvb_filter->filterEventGroupUpdate(eg_update_from_storage);
         if (!filtered_eg_update) {
           next_global_eg_id_to_read++;
+          metrics.num_skipped_event_groups++;
           continue;
         }
         // Overwrite event group ID in the filtered update to external event group ID:

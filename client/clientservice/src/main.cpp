@@ -88,7 +88,7 @@ class JaegerLogger : public jaegertracing::logging::Logger {
   void info(const std::string& message) override { LOG_INFO(logger, message); }
 };
 
-void initJaeger(const std::string& addr, const std::string& id) {
+void initJaeger(const std::string& addr) {
   // No sampling for now - report all traces
   jaegertracing::samplers::Config sampler_config(jaegertracing::kSamplerTypeConst, 1.0);
   jaegertracing::reporters::Config reporter_config(jaegertracing::reporters::Config::kDefaultQueueSize,
@@ -100,7 +100,7 @@ void initJaeger(const std::string& addr, const std::string& id) {
                                                            jaegertracing::kTraceContextHeaderName,
                                                            jaegertracing::kTraceBaggageHeaderPrefix);
   jaegertracing::baggage::RestrictionsConfig baggage_restrictions(false, "", std::chrono::steady_clock::duration());
-  std::string trace_proc_name = "clientservice-" + id;
+  std::string trace_proc_name = "clientservice";
   jaegertracing::Config config(false,
                                false,
                                sampler_config,
@@ -170,14 +170,14 @@ int main(int argc, char** argv) {
   // Tracing
   if (opts.count("jaeger")) {
     auto jaeger_addr = opts["jaeger"].as<std::string>();
-    initJaeger(jaeger_addr, opts["tr-id"].as<std::string>());
+    initJaeger(jaeger_addr);
     LOG_INFO(logger, "Sending trace data to Jaeger Agent at " << jaeger_addr);
   } else {
     LOG_INFO(logger, "No Jaeger Agent address provided");
   }
 
   auto concord_client = std::make_unique<ConcordClient>(config, metrics_collector->getAggregator());
-  clientservice = std::make_unique<ClientService>(std::move(concord_client));
+  clientservice = std::make_unique<ClientService>(std::move(concord_client), metrics_collector->getAggregator());
 
   try {
     auto server_addr = opts["host"].as<std::string>() + ":" + std::to_string(opts["port"].as<unsigned>());

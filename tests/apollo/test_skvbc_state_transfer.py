@@ -41,6 +41,12 @@ def start_replica_cmd(builddir, replica_id):
     viewChangeTimeoutMilli = "10000"
     path = os.path.join(builddir, "tests", "simpleKVBC",
                         "TesterReplica", "skvbc_replica")
+
+    if os.environ.get('BLOCKCHAIN_VERSION', default="1").lower() == "4" :
+        blockchain_version = "4"
+    else :
+        blockchain_version = "1"
+        
     return [path,
             "-k", KEY_FILE_PREFIX,
             "-i", str(replica_id),
@@ -48,6 +54,7 @@ def start_replica_cmd(builddir, replica_id):
             "-v", viewChangeTimeoutMilli,
             "-e", str(True),
             "-f", '1',
+            "-V",blockchain_version,
             "-o", builddir + "/operator_pub.pem"
             ]
 
@@ -84,7 +91,6 @@ class SkvbcStateTransferTest(ApolloTest):
         await bft_network.force_quorum_including_replica(stale_node)
         await skvbc.assert_successful_put_get()
 
-    @unittest.skip("Disable until BC-19686 gets resolved.")
     @with_trio
     @with_bft_network(start_replica_cmd, rotate_keys=True)
     async def test_state_transfer_with_multiple_clients(self, bft_network,exchange_keys=True):
@@ -102,7 +108,7 @@ class SkvbcStateTransferTest(ApolloTest):
         bft_network.start_replicas(working_replicas)
 
         # Need to send more than self.STATE_TRANSFER_WINDOW due to batching
-        await skvbc.run_concurrent_ops(int(STATE_TRANSFER_WINDOW * 1.5), write_weight=1)
+        await skvbc.run_concurrent_ops(int(STATE_TRANSFER_WINDOW * 3), write_weight=1)
         await skvbc.network_wait_for_checkpoint(working_replicas,
                                                 expected_checkpoint_num=lambda checkpoint_num: checkpoint_num >= 2)
 
@@ -233,7 +239,6 @@ class SkvbcStateTransferTest(ApolloTest):
         await bft_network.wait_for_state_transfer_to_stop(0, stale_node)
         await bft_network.wait_for_replicas_rvt_root_values_to_be_in_sync(bft_network.all_replicas())
 
-    @unittest.skip("Unstable test - disabled until fixed BC-19123")
     @with_trio
     @with_bft_network(start_replica_cmd)
     async def test_state_transfer_rvt_validity_after_pruning(self, bft_network):
@@ -358,7 +363,9 @@ class SkvbcStateTransferTest(ApolloTest):
                 print(f'Replica {replica_to_restart} will be restarted.')
                 bft_network.stop_replica(replica_to_restart, True)
                 bft_network.start_replica(replica_to_restart)
-                await trio.sleep(seconds=1)
+                # Restarted replica should get enough time to load metric holding last-stored-checkpoint
+                # Ideally concord should not allow to read metric while replica is still coming up or going down
+                await trio.sleep(seconds=2)
 
         # Validate that the RVT root values are in sync after all of the prunings and restarts have finished
         await bft_network.wait_for_replicas_rvt_root_values_to_be_in_sync(bft_network.all_replicas())

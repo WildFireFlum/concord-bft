@@ -41,7 +41,9 @@ class KeyExchangeManager {
   void registerForNotification(IKeyExchanger* ke) { registryToExchange_.push_back(ke); }
   // Called at the end of state transfer
   void loadPublicKeys();
+  void loadClientPublicKeys();
   // whether initial key exchange has occurred
+
   bool exchanged() const {
     uint32_t liveClusterSize = ReplicaConfig::instance().waitForFullCommOnStartup ? clusterSize_ : quorumSize_;
     bool exchange_self_keys = publicKeys_.keyExists(ReplicaConfig::instance().replicaId);
@@ -53,8 +55,7 @@ class KeyExchangeManager {
   const std::string kInitialClientsKeysCid = "CLIENTS-PUB-KEYS-";
   ///////// Clients public keys interface///////////////
   // whether clients keys were published
-  bool clientKeysPublished() const { return clientsPublicKeys_.published_; }
-  void setClientKeysAsPublished() { clientsPublicKeys_.published_ = true; }
+  bool clientKeysPublished() const { return clientsPublicKeys_.published(); }
   void saveClientsPublicKeys(const std::string& keys) {
     metrics_->clients_keys_published_status.Get().Set("True");
     clientsPublicKeys_.save(keys);

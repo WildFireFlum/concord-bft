@@ -1,6 +1,6 @@
 CONCORD_BFT_DOCKER_REPO?=concordbft/
 CONCORD_BFT_DOCKER_IMAGE?=concord-bft
-CONCORD_BFT_DOCKER_IMAGE_VERSION?=0.41
+CONCORD_BFT_DOCKER_IMAGE_VERSION?=0.42
 CONCORD_BFT_DOCKER_CONTAINER?=concord-bft
 
 CONCORD_BFT_DOCKERFILE?=Dockerfile
@@ -20,6 +20,7 @@ CONCORD_BFT_CONTAINER_CXX?=clang++
 CONCORD_BFT_CMAKE_BUILD_TYPE?=Release
 CONCORD_BFT_CMAKE_BUILD_TESTING?=TRUE
 CONCORD_BFT_CLANG_TIDY?=${CONCORD_BFT_TARGET_SOURCE_PATH}/tools/run-clang-tidy.py
+CONCORD_BFT_RUN_SIMPLE_TEST?=./build/tests/simpleTest/scripts/testReplicasAndClient.sh
 
 # UDP | TLS | TCP
 CONCORD_BFT_CMAKE_TRANSPORT?=TLS
@@ -56,6 +57,7 @@ CONCORD_BFT_CMAKE_ASAN?=FALSE
 CONCORD_BFT_CMAKE_TSAN?=FALSE
 CONCORD_BFT_CMAKE_CODECOVERAGE?=FALSE
 CONCORD_BFT_CMAKE_USE_FAKE_CLOCK_IN_TIME_SERVICE?=FALSE
+ENABLE_RESTART_RECOVERY_TESTS?=FALSE
 ifeq (${CONCORD_BFT_CMAKE_ASAN},TRUE)
 	CONCORD_BFT_CMAKE_CXX_FLAGS_RELEASE='-O0 -g'
 else ifeq (${CONCORD_BFT_CMAKE_TSAN},TRUE)
@@ -88,7 +90,8 @@ CONCORD_BFT_CMAKE_FLAGS?= \
 			-DLEAKCHECK=${CONCORD_BFT_CMAKE_ASAN} \
 			-DTHREADCHECK=${CONCORD_BFT_CMAKE_TSAN} \
 			-DCODECOVERAGE=${CONCORD_BFT_CMAKE_CODECOVERAGE} \
-			-DTXN_SIGNING_ENABLED=${CONCORD_BFT_CMAKE_TRANSACTION_SIGNING_ENABLED}
+			-DTXN_SIGNING_ENABLED=${CONCORD_BFT_CMAKE_TRANSACTION_SIGNING_ENABLED} \
+			-DENABLE_RESTART_RECOVERY_TESTS=${ENABLE_RESTART_RECOVERY_TESTS}
 
 
 # The consistency parameter makes sense only at MacOS.
@@ -198,7 +201,8 @@ tidy-check: gen_cmake ## Run clang-tidy
 		make -C ${CONCORD_BFT_CLIENT_PROTO_PATH} &> /dev/null && \
 		make -C ${CONCORD_BFT_THIN_REPLICA_PROTO_PATH} &> /dev/null && \
 		make -C ${CONCORD_BFT_KVBC_PROTO_PATH} &> /dev/null && \
-		${CONCORD_BFT_CLANG_TIDY} -ignore ../.clang-tidy-ignore 2>&1 | tee clang-tidy-report.txt | ( ! grep 'error:\|note:' ) && \
+		${CONCORD_BFT_CLANG_TIDY} -ignore ../.clang-tidy-ignore 2>&1 | tee clang-tidy-report.txt && \
+		cat clang-tidy-report.txt | ( ! grep 'error:\|note:' ) && \
 		../scripts/check-forbidden-usage.sh .." \
 		&& (echo "\nClang-tidy finished successfully.") \
 		|| ( echo "\nClang-tidy failed. The full report is in ${CURDIR}/${CONCORD_BFT_BUILD_DIR}/clang-tidy-report.txt. \
@@ -229,6 +233,12 @@ test: ## Run all tests
 		"mkdir -p ${CONCORD_BFT_CORE_DIR} && \
 		cd ${CONCORD_BFT_BUILD_DIR} && \
 		ctest ${CONCORD_BFT_ADDITIONAL_CTEST_RUN_PARAMS} --timeout ${CONCORD_BFT_CTEST_TIMEOUT} --output-on-failure"
+
+.PHONY: simple-test
+simple-test: ## Run Simple Test
+	docker run ${BASIC_RUN_PARAMS} \
+	        ${CONCORD_BFT_CONTAINER_SHELL} -c \
+	        "timeout 300 ${CONCORD_BFT_RUN_SIMPLE_TEST}"
 
 .PHONY: test-range
 test-range: ## Run all tests in the range [START,END], inclusive: `make test-range START=<#start_test> END=<#end_test>`. To get test numbers, use list-tests.

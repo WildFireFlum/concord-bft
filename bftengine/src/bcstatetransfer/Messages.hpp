@@ -56,17 +56,20 @@ struct AskForCheckpointSummariesMsg : public BCStateTranBaseMsg {
 struct CheckpointSummaryMsg : public BCStateTranBaseMsg {
   CheckpointSummaryMsg() = delete;
 
-  static CheckpointSummaryMsg* create(size_t rvbDataSize) {
+  static CheckpointSummaryMsg* alloc(size_t rvbDataSize) {
     size_t totalByteSize = sizeof(CheckpointSummaryMsg) + rvbDataSize - 1;
-    CheckpointSummaryMsg* msg{reinterpret_cast<CheckpointSummaryMsg*>(new char[totalByteSize])};
+    CheckpointSummaryMsg* msg{static_cast<CheckpointSummaryMsg*>(std::malloc(totalByteSize))};
+    if (!msg) {
+      throw std::bad_alloc();
+    }
     memset(msg, 0, totalByteSize);
     msg->type = MsgType::CheckpointsSummary;
     msg->rvbDataSize = rvbDataSize;
     return msg;
   }
 
-  static CheckpointSummaryMsg* create(const CheckpointSummaryMsg* rMsg) {
-    auto msg = create(rMsg->rvbDataSize);
+  static CheckpointSummaryMsg* alloc(const CheckpointSummaryMsg* rMsg) {
+    auto msg = alloc(rMsg->rvbDataSize);
     msg->checkpointNum = rMsg->checkpointNum;
     msg->maxBlockId = rMsg->maxBlockId;
     msg->digestOfMaxBlockId = rMsg->digestOfMaxBlockId;
@@ -74,6 +77,10 @@ struct CheckpointSummaryMsg : public BCStateTranBaseMsg {
     msg->requestMsgSeqNum = rMsg->requestMsgSeqNum;
     memcpy(msg->data, rMsg->data, rMsg->rvbDataSize);
     return msg;
+  }
+
+  static void free(const CheckpointSummaryMsg* msg) {
+    std::free(const_cast<char*>(reinterpret_cast<const char*>(msg)));
   }
 
   static void free(void* context, const CheckpointSummaryMsg* msg) {
@@ -169,8 +176,9 @@ struct FetchBlocksMsg : public BCStateTranBaseMsg {
   uint64_t msgSeqNum;
   uint64_t minBlockId;
   uint64_t maxBlockId;
-  uint16_t lastKnownChunkInLastRequiredBlock;
+  uint64_t maxBlockIdInCycle;
   uint64_t rvbGroupId;
+  uint16_t lastKnownChunkInLastRequiredBlock;
 };
 
 struct FetchResPagesMsg : public BCStateTranBaseMsg {
@@ -186,30 +194,57 @@ struct FetchResPagesMsg : public BCStateTranBaseMsg {
 };
 
 struct RejectFetchingMsg : public BCStateTranBaseMsg {
-  RejectFetchingMsg() {
+  class Reason {
+   public:
+    enum : uint16_t {
+      FIRST = 0,  // should not be used and must be first!
+
+      RES_PAGE_NOT_FOUND = 1,
+      IN_STATE_TRANSFER = 2,
+      BLOCK_RANGE_NOT_FOUND = 3,
+      IN_ACTIVE_SESSION = 4,
+      INVALID_NUMBER_OF_BLOCKS_REQUESTED = 5,
+      BLOCK_NOT_FOUND_IN_STORAGE = 6,
+      DIGESTS_FOR_RVBGROUP_NOT_FOUND = 7,
+
+      LAST,  // should not be used and must be last!
+    };
+  };
+  RejectFetchingMsg() = delete;
+  RejectFetchingMsg(uint16_t rejCode, uint64_t reqMsgSeqNum) {
     memset(this, 0, sizeof(RejectFetchingMsg));
     type = MsgType::RejectFetching;
+    rejectionCode = rejCode;
+    requestMsgSeqNum = reqMsgSeqNum;
   }
 
   uint64_t requestMsgSeqNum;
+  uint16_t rejectionCode;
+
+  static inline std::map<uint16_t, const char*> reasonMessages = {
+      {Reason::RES_PAGE_NOT_FOUND, "Reserved page not found"},
+      {Reason::IN_STATE_TRANSFER, "In state transfer"},
+      {Reason::BLOCK_RANGE_NOT_FOUND, "Block range not found"},
+      {Reason::IN_ACTIVE_SESSION, "In active session"},
+      {Reason::INVALID_NUMBER_OF_BLOCKS_REQUESTED, "Invalid number of blocks requested"},
+      {Reason::BLOCK_NOT_FOUND_IN_STORAGE, "Block not found in storage"},
+      {Reason::DIGESTS_FOR_RVBGROUP_NOT_FOUND, "Digests for RVB group not found"}};
 };
 
 struct ItemDataMsg : public BCStateTranBaseMsg {
   static ItemDataMsg* alloc(uint32_t dataSize) {
-    size_t s = sizeof(ItemDataMsg) - 1 + dataSize;
-    char* buff = reinterpret_cast<char*>(std::malloc(s));
-    memset(buff, 0, s);
-    ItemDataMsg* retVal = reinterpret_cast<ItemDataMsg*>(buff);
-    retVal->type = MsgType::ItemData;
-    retVal->dataSize = dataSize;
-
-    return retVal;
+    size_t msgSize = sizeof(ItemDataMsg) - 1 + dataSize;
+    ItemDataMsg* msg = static_cast<ItemDataMsg*>(std::malloc(msgSize));
+    if (!msg) {
+      throw std::bad_alloc();
+    }
+    memset(msg, 0, msgSize);
+    msg->type = MsgType::ItemData;
+    msg->dataSize = dataSize;
+    return msg;
   }
 
-  static void free(ItemDataMsg* i) {
-    void* buff = i;
-    std::free(buff);
-  }
+  static void free(ItemDataMsg* msg) { std::free(msg); }
 
   uint64_t requestMsgSeqNum;
   uint64_t blockNumber;

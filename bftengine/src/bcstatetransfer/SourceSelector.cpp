@@ -34,10 +34,20 @@ void SourceSelector::setFetchingTimeStamp(uint64_t currTimeMilli, bool retransmi
 void SourceSelector::removeCurrentReplica() {
   preferredReplicas_.erase(currentReplica_);
   currentReplica_ = NO_REPLICA;
+  checkAndRefillPreferredReplicas();
   receivedValidBlockFromSrc_ = false;
   setSourceSelectionTime(0);
   metrics_.current_source_replica_.Get().Set(currentReplica_);
   metrics_.preferred_replicas_.Get().Set(preferredReplicasToString());
+}
+
+void SourceSelector::removePreferredReplica(uint16_t replicaId) {
+  if (preferredReplicas_.find(replicaId) == preferredReplicas_.end()) {
+    LOG_WARN(logger_, "Not found" << KVLOG(replicaId));
+    return;
+  }
+  preferredReplicas_.erase(replicaId);
+  checkAndRefillPreferredReplicas();
 }
 
 void SourceSelector::onReceivedValidBlockFromSource() {
@@ -47,11 +57,6 @@ void SourceSelector::onReceivedValidBlockFromSource() {
     LOG_INFO(logger_, "Insert source " << currentReplica_ << " into actualSources_");
     actualSources_.push_back(currentReplica_);
   }
-}
-
-void SourceSelector::setAllReplicasAsPreferred() {
-  preferredReplicas_ = allOtherReplicas_;
-  metrics_.preferred_replicas_.Get().Set(preferredReplicasToString());
 }
 
 void SourceSelector::reset() {
@@ -91,6 +96,7 @@ bool SourceSelector::retransmissionTimeoutExpired(uint64_t currTimeMilli) const 
   auto diff = (currTimeMilli - fetchingTimeStamp_);
   if (diff > retransmissionTimeoutMilli_) {
     LOG_DEBUG(logger_, "Retransmit:" << KVLOG(diff, currTimeMilli, fetchingTimeStamp_, retransmissionTimeoutMilli_));
+    metrics_.total_retransmissions_expired_++;
     return true;
   }
   return false;
@@ -102,17 +108,22 @@ uint64_t SourceSelector::timeSinceSourceSelectedMilli(uint64_t currTimeMilli) co
              : (currTimeMilli - sourceSelectionTimeMilli_);
 }
 
-// Replace the source.
-void SourceSelector::updateSource(uint64_t currTimeMilli) {
-  if (currentReplica_ != NO_REPLICA) {
-    preferredReplicas_.erase(currentReplica_);
-  }
+void SourceSelector::checkAndRefillPreferredReplicas() {
   if (preferredReplicas_.empty()) {
     preferredReplicas_ = allOtherReplicas_;
     if (currentPrimary_ != NO_REPLICA) {
       preferredReplicas_.erase(currentPrimary_);
     }
+    metrics_.preferred_replicas_.Get().Set(preferredReplicasToString());
   }
+}
+
+// Replace the source.
+void SourceSelector::updateSource(uint64_t currTimeMilli) {
+  if (currentReplica_ != NO_REPLICA) {
+    preferredReplicas_.erase(currentReplica_);
+  }
+  checkAndRefillPreferredReplicas();
   selectSource(currTimeMilli);
 }
 
@@ -210,7 +221,9 @@ void SourceSelector::selectSource(uint64_t currTimeMilli) {
 }
 
 void SourceSelector::updateCurrentPrimary(uint16_t newPrimary) {
-  if (currentPrimary_ == newPrimary) return;
+  if (currentPrimary_ == newPrimary) {
+    return;
+  }
   auto resetNominatedPrimary = [&]() {
     nominatedPrimary_ = NO_REPLICA;
     nominatedPrimaryCounter_ = 0;

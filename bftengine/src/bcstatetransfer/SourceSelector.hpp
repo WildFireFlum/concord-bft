@@ -67,11 +67,11 @@ class SourceSelector {
                  metrics_component_.RegisterCounter("replacement_due_to_retransmission_timeout"),
                  metrics_component_.RegisterCounter("replacement_due_to_periodic_change"),
                  metrics_component_.RegisterCounter("replacement_due_to_source_same_as_primary"),
-                 metrics_component_.RegisterCounter("total_replacements")} {}
+                 metrics_component_.RegisterCounter("total_replacements"),
+                 metrics_component_.RegisterCounter("total_retransmissions_expired")} {}
 
   bool hasSource() const;
   void removeCurrentReplica();
-  void setAllReplicasAsPreferred();
   void reset();
   bool isReset() const;
   bool retransmissionTimeoutExpired(uint64_t currTimeMilli) const;
@@ -105,7 +105,7 @@ class SourceSelector {
 
   uint16_t currentPrimary() { return currentPrimary_; }
 
-  void removePreferredReplica(uint16_t replicaId) { preferredReplicas_.erase(replicaId); }
+  void removePreferredReplica(uint16_t replicaId);
 
   uint16_t numberOfPreferredReplicas() const { return static_cast<uint16_t>(preferredReplicas_.size()); }
 
@@ -123,11 +123,13 @@ class SourceSelector {
 
   uint16_t minPrePrepareMsgsForPrimaryAwareness() { return minPrePrepareMsgsForPrimaryAwareness_; }
 
+  void checkAndRefillPreferredReplicas();
+
   // Metric
   void setAggregator(std::shared_ptr<concordMetrics::Aggregator> aggregator) {
     metrics_component_.SetAggregator(aggregator);
   }
-  void updateMetricToAggregator() { metrics_component_.UpdateAggregator(); }
+  void UpdateAggregator() { metrics_component_.UpdateAggregator(); }
   concordMetrics::Component &getMetricComponent() { return metrics_component_; }
 
  private:
@@ -173,6 +175,8 @@ class SourceSelector {
     CounterHandle replacement_due_to_periodic_change_;
     CounterHandle replacement_due_to_source_same_as_primary_;
     CounterHandle total_replacements_;
+
+    CounterHandle total_retransmissions_expired_;
   };
   mutable Metrics metrics_;
 };

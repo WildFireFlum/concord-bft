@@ -40,10 +40,12 @@
 #include "strategy/StrategyUtils.hpp"
 #include "strategy/ByzantineStrategy.hpp"
 #include "strategy/ShufflePrePrepareMsgStrategy.hpp"
+#include "strategy/CorruptCheckpointMsgStrategy.hpp"
 #include "strategy/DelayStateTransferMsgStrategy.hpp"
 #include "strategy/MangledPreProcessResultMsgStrategy.hpp"
 #include "WrapCommunication.hpp"
 #include "secrets_manager_enc.h"
+#include "blockchain_misc.hpp"
 
 #ifdef USE_S3_OBJECT_STORE
 #include "s3/config_parser.hpp"
@@ -86,6 +88,7 @@ std::unique_ptr<TestSetup> TestSetup::ParseArgs(int argc, char** argv) {
     replicaConfig.set("concord.bft.st.RVT_K", 12);
     replicaConfig.preExecutionResultAuthEnabled = false;
     replicaConfig.numOfClientServices = 1;
+    replicaConfig.kvBlockchainVersion = 4;
     const auto persistMode = PersistencyMode::RocksDB;
     std::string keysFilePrefix;
     std::string commConfigFile;
@@ -99,12 +102,16 @@ std::unique_ptr<TestSetup> TestSetup::ParseArgs(int argc, char** argv) {
     bool is_separate_communication_mode = false;
     int addAllKeysAsPublic = 0;
     int stateTransferMsgDelayMs = 0;
+    std::unordered_set<ReplicaId> byzantineReplicaIds{};
 
-    // do not change order of the next options, as some might use an option index!
+    // !!! DO NOT change the order of the next options, as some might use an option index !!!
     static struct option longOptions[] = {
-        // long format only options should be put here. They all should use val=2 and handled in a single place in
+        // !!! ATTENTION !!! long format only options should be put here on top. They all should use val=2 and handled
+        // in a single place in
         // the while loop
         {"delay-state-transfer-messages-millisec", required_argument, 0, 2},
+        {"corrupt-checkpoint-messages-from-replica-ids", required_argument, 0, 2},
+        {"diagnostics-port", required_argument, 0, 2},
 
         // long/short format options
         {"replica-id", required_argument, 0, 'i'},
@@ -132,18 +139,19 @@ std::unique_ptr<TestSetup> TestSetup::ParseArgs(int argc, char** argv) {
         {"replica-byzantine-strategies", optional_argument, 0, 'g'},
         {"pre-exec-result-auth", no_argument, 0, 'x'},
         {"time_service", optional_argument, 0, 'f'},
+        {"blockchain-version", optional_argument, 0, 'V'},
         {"enable-db-checkpoint", required_argument, 0, 'h'},
 
         // direct options - assign directly ro a non-null flag
         {"publish-master-key-on-startup", no_argument, (int*)&replicaConfig.publishReplicasMasterKeyOnStartup, 1},
         {"add-all-keys-as-public", no_argument, &addAllKeysAsPublic, 1},
-        {"diagnostics-port", required_argument, 0, 2},
         {0, 0, 0, 0}};
     int o = 0;
     int optionIndex = 0;
     LOG_INFO(GL, "Command line options:");
     while ((o = getopt_long(
-                argc, argv, "i:k:n:s:v:a:3:l:e:w:c:b:m:q:z:y:udp:t:o:r:g:xf:h:j:", longOptions, &optionIndex)) != -1) {
+                argc, argv, "i:k:n:s:v:a:3:l:e:w:c:b:m:q:z:y:udp:t:o:r:g:xf:h:j:V:", longOptions, &optionIndex)) !=
+           -1) {
       switch (o) {
         // long-options-only first
         case 2:
@@ -162,7 +170,32 @@ std::unique_ptr<TestSetup> TestSetup::ParseArgs(int argc, char** argv) {
               stateTransferMsgDelayMs = stoi(str);
               byzantineStrategies = concord::kvbc::strategy::DelayStateTransferMsgStrategy(logger, 0).getStrategyName();
             } break;
-            case 29: {
+            case 1: {
+              std::string str{optarg};
+              if (str.empty()) {
+                throw std::runtime_error{"no argument provided for --corrupt-checkpoint-messages-from-replica-ids"};
+              }
+
+              std::stringstream ss{str};
+              try {
+                for (int i = 0; ss >> i;) {
+                  LOG_INFO(GL, "Adding replica " + std::to_string(i) + " to the set of byzantine replicas.");
+                  byzantineReplicaIds.insert(i);
+                  if (ss.peek() == ',') ss.ignore();
+                }
+              } catch (std::exception&) {
+                LOG_INFO(GL, "Failed to parse" << KVLOG(str) << ". Expecting comma separated replica IDs");
+                throw std::runtime_error{
+                    "invalid argument for --corrupt-checkpoint-messages-from-replica-ids. More information in log."};
+              }
+
+              if (byzantineReplicaIds.empty()) {
+                throw std::runtime_error{"invalid argument for --corrupt-checkpoint-messages-from-replica-ids"};
+              }
+
+              byzantineStrategies = concord::kvbc::strategy::CorruptCheckpointMsgStrategy::strategyName();
+            } break;
+            case 2: {
               std::string arg{optarg};
               try {
                 replicaConfig.diagnosticsServerPort = arg.empty() ? 0 : std::stoi(arg);
@@ -197,6 +230,15 @@ std::unique_ptr<TestSetup> TestSetup::ParseArgs(int argc, char** argv) {
         case 'v': {
           replicaConfig.viewChangeTimerMillisec = concord::util::to<std::uint16_t>(std::string(optarg));
           replicaConfig.viewChangeProtocolEnabled = true;
+        } break;
+        case 'V': {
+          auto version = concord::util::to<std::uint16_t>(std::string(optarg));
+          if (version != BLOCKCHAIN_VERSION::CATEGORIZED_BLOCKCHAIN && version != BLOCKCHAIN_VERSION::V4_BLOCKCHAIN) {
+            std::ostringstream ss;
+            ss << "invalid option for blockchain version " << version;
+            throw std::runtime_error{ss.str()};
+          }
+          replicaConfig.kvBlockchainVersion = version;
         } break;
         case 'a': {
           replicaConfig.autoPrimaryRotationTimerMillisec = concord::util::to<std::uint16_t>(std::string(optarg));
@@ -353,7 +395,9 @@ std::unique_ptr<TestSetup> TestSetup::ParseArgs(int argc, char** argv) {
       const std::vector<std::shared_ptr<concord::kvbc::strategy::IByzantineStrategy>> allStrategies = {
           std::make_shared<concord::kvbc::strategy::ShufflePrePrepareMsgStrategy>(logger),
           std::make_shared<concord::kvbc::strategy::MangledPreProcessResultMsgStrategy>(logger),
-          std::make_shared<concord::kvbc::strategy::DelayStateTransferMsgStrategy>(logger, stateTransferMsgDelayMs)};
+          std::make_shared<concord::kvbc::strategy::DelayStateTransferMsgStrategy>(logger, stateTransferMsgDelayMs),
+          std::make_shared<concord::kvbc::strategy::CorruptCheckpointMsgStrategy>(logger,
+                                                                                  std::move(byzantineReplicaIds))};
       WrapCommunication::addStrategies(byzantineStrategies, ',', allStrategies);
 
       std::unique_ptr<bft::communication::ICommunication> wrappedComm =

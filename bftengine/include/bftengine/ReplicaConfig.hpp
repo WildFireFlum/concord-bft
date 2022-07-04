@@ -72,7 +72,7 @@ class ReplicaConfig : public concord::serialize::SerializableFactory<ReplicaConf
                "1 <= concurrencyLevel <= 30");
   CONFIG_PARAM(numWorkerThreadsForBlockIO,
                uint16_t,
-               0,
+               8,
                "Number of workers threads to be used for blocks IO"
                "operations. When set to 0, std::thread::hardware_concurrency() is set by default");
   CONFIG_PARAM(viewChangeProtocolEnabled, bool, false, "whether the view change protocol enabled");
@@ -223,8 +223,8 @@ class ReplicaConfig : public concord::serialize::SerializableFactory<ReplicaConf
                "If true, replicas will publish their master key on startup");
   // Db checkpoint
   CONFIG_PARAM(dbCheckpointFeatureEnabled, bool, false, "Feature flag for rocksDb checkpoints");
-  CONFIG_PARAM(maxNumberOfDbCheckpoints, uint32_t, 0u, "Max number of db checkpoints to be created");
-  CONFIG_PARAM(dbCheckPointWindowSize, uint32_t, 300u, "Db checkpoint window size in bft sequence number");
+  CONFIG_PARAM(maxNumberOfDbCheckpoints, uint32_t, 2u, "Max number of db checkpoints to be created");
+  CONFIG_PARAM(dbCheckPointWindowSize, uint32_t, 30000u, "Db checkpoint window size in bft sequence number");
   CONFIG_PARAM(dbCheckpointDirPath, std::string, "", "Db checkpoint directory path");
   CONFIG_PARAM(dbSnapshotIntervalSeconds,
                std::chrono::seconds,
@@ -279,6 +279,7 @@ class ReplicaConfig : public concord::serialize::SerializableFactory<ReplicaConf
                0,
                "Port to be used to communicate with the diagnostic server using"
                "the concord-ctl script");
+  CONFIG_PARAM(kvBlockchainVersion, std::uint32_t, 1u, "Default version of KV blockchain for this replica");
 
   // Parameter to enable/disable waiting for transaction data to be persisted.
   // Not predefined configuration parameters
@@ -404,6 +405,7 @@ class ReplicaConfig : public concord::serialize::SerializableFactory<ReplicaConf
     serialize(outStream, enablePreProcessorMemoryPool);
     serialize(outStream, diagnosticsServerPort);
     serialize(outStream, useUnifiedCertificates);
+    serialize(outStream, kvBlockchainVersion);
   }
   void deserializeDataMembers(std::istream& inStream) {
     deserialize(inStream, isReadOnly);
@@ -503,6 +505,7 @@ class ReplicaConfig : public concord::serialize::SerializableFactory<ReplicaConf
     deserialize(inStream, enablePreProcessorMemoryPool);
     deserialize(inStream, diagnosticsServerPort);
     deserialize(inStream, useUnifiedCertificates);
+    deserialize(inStream, kvBlockchainVersion);
   }
 
  private:
@@ -595,7 +598,8 @@ inline std::ostream& operator<<(std::ostream& os, const ReplicaConfig& rc) {
               rc.operatorEnabled_,
               rc.enablePreProcessorMemoryPool,
               rc.diagnosticsServerPort,
-              rc.useUnifiedCertificates);
+              rc.useUnifiedCertificates,
+              rc.kvBlockchainVersion);
   os << ", ";
   for (auto& [param, value] : rc.config_params_) os << param << ": " << value << "\n";
   return os;

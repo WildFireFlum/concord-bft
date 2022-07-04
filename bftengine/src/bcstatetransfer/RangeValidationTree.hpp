@@ -27,8 +27,13 @@
 #include "Digest.hpp"
 #include "Serializable.h"
 #include "Logger.hpp"
+#include "Metrics.hpp"
 
 namespace bftEngine::bcst::impl {
+
+using concordMetrics::GaugeHandle;
+using concordMetrics::Aggregator;
+using concordMetrics::CounterHandle;
 
 using RVBGroupId = uint64_t;
 using RVBId = uint64_t;
@@ -59,7 +64,7 @@ using RVBIndex = uint64_t;
 // 3. Each node in tree is represented having type as NodeInfo.
 // 4. NodeVal is stored in form of CryptoPP::Integer.
 //
-// Implemention notes -
+// Implementation notes -
 // 1. APIs do not throw exception
 // 2. Thread safety is delegated to caller (e.g. RVBManager)
 // 3. Bad inputs values are asserted
@@ -125,15 +130,23 @@ class RangeValidationTree {
 
   enum class LogPrintVerbosity { DETAILED, SUMMARY };
 
-  // Log tree only if total elements are less than 10K. In case of failure can assert.
-  // SUMMARY - prints basic structure and node ids only
-  void printToLog(LogPrintVerbosity verbosity, std::string&& user_label = "") const noexcept;  // change to 3 levels
+  // Prints current tree information to log. Basic information is always printed. If verbosity is DETAILED and there
+  // less than kMaxNodesToPrintStructure+1 nodes in the tree, structure is printed as well.
+  // The label is an optional string, to mark the caller.
+  void printToLog(LogPrintVerbosity verbosity, std::string&& user_label = "") const noexcept;
 
   // Validate structure and values inside tree. In case of failure can assert.
   bool validate() const noexcept;
 
   size_t totalNodes() const { return id_to_node_.size(); }
   size_t totalLevels() const { return root_ ? root_->info_.level() : 0; }
+
+  // Metrics
+  void UpdateAggregator() { metrics_component_.UpdateAggregator(); }
+  concordMetrics::Component& getMetricComponent() { return metrics_component_; }
+  void setAggregator(std::shared_ptr<concordMetrics::Aggregator> aggregator) {
+    metrics_component_.SetAggregator(aggregator);
+  }
 
  public:
   struct NodeVal {
@@ -142,9 +155,9 @@ class RangeValidationTree {
 
     NodeVal(const std::shared_ptr<char[]>&& val, size_t size);
     NodeVal(const char* val_ptr, size_t size);
-    NodeVal(const NodeVal_t* val);
-    NodeVal(const NodeVal_t& val);
-    NodeVal(const NodeVal_t&& val);
+    explicit NodeVal(const NodeVal_t* val);
+    explicit NodeVal(const NodeVal_t& val);
+    explicit NodeVal(const NodeVal_t&& val);
     NodeVal();
 
     NodeVal& operator+=(const NodeVal& other);
@@ -164,14 +177,14 @@ class RangeValidationTree {
   };
 
   struct NodeInfo {
-    NodeInfo(uint64_t node_id) : id_data_(node_id) {}
+    explicit NodeInfo(uint64_t node_id) : id_data_(node_id) {}
     NodeInfo(uint8_t l, uint64_t index) : id_data_(l, index) {}
     NodeInfo() = delete;
 
-    bool operator<(NodeInfo& other) const noexcept {
+    bool operator<(const NodeInfo& other) const noexcept {
       return ((level() <= other.level()) || (rvb_index() < other.rvb_index())) ? true : false;
     }
-    bool operator!=(NodeInfo& other) const noexcept {
+    bool operator!=(const NodeInfo& other) const noexcept {
       return ((level() != other.level()) || (rvb_index() != other.rvb_index())) ? true : false;
     }
     std::string toString() const noexcept;
@@ -278,7 +291,7 @@ class RangeValidationTree {
   using RVTNodePtr = std::shared_ptr<RVTNode>;
 
   struct RVTNode : public RVBNode {
-    RVTNode(const RVBNodePtr& child_node);
+    explicit RVTNode(const RVBNodePtr& child_node);
     RVTNode(uint8_t level, uint64_t rvb_index);
     RVTNode(SerializedRVTNode& node, char* cur_val_ptr, size_t cur_value_size);
     static RVTNodePtr createFromSerialized(std::istringstream& is);
@@ -348,7 +361,7 @@ class RangeValidationTree {
   // level 0 represents RVB node so it would always hold 0x0
   std::array<RVTNodePtr, NodeInfo::kMaxLevels> rightmost_rvt_node_;
   std::array<RVTNodePtr, NodeInfo::kMaxLevels> leftmost_rvt_node_;
-  std::unordered_map<uint64_t, RVTNodePtr> id_to_node_;
+  std::map<uint64_t, RVTNodePtr> id_to_node_;
   RVTNodePtr root_{nullptr};
   uint64_t min_rvb_index_{};  // RVB index is (RVB ID / fetch range size). This is the minimal index in the tree.
   uint64_t max_rvb_index_{};  // RVB index is (RVB ID / fetch range size). This is the maximal index in the tree.
@@ -359,12 +372,25 @@ class RangeValidationTree {
   static uint32_t RVT_K;
   const uint32_t fetch_range_size_{};
   const size_t value_size_{};
-  static constexpr size_t kMaxNodesToPrint{10000};
+  static constexpr size_t kMaxNodesToPrintStructure{100};
   static constexpr uint8_t CHECKPOINT_PERSISTENCY_VERSION{1};
   static constexpr uint8_t version_num_{CHECKPOINT_PERSISTENCY_VERSION};
   static constexpr uint64_t magic_num_{0x1122334455667788};
   static constexpr uint8_t kDefaultRVBLeafLevel = 0;
   static constexpr uint8_t kDefaultRVTLeafLevel = 1;
+
+ protected:
+  concordMetrics::Component metrics_component_;
+  struct Metrics {
+    GaugeHandle rvt_size_in_bytes_;
+    GaugeHandle total_rvt_nodes_;
+    GaugeHandle total_rvt_levels_;
+    GaugeHandle rvt_min_rvb_id_;
+    GaugeHandle rvt_max_rvb_id_;
+    GaugeHandle serialized_rvt_size_;
+    CounterHandle rvt_validation_failures_;
+  };
+  mutable Metrics metrics_;
 };
 
 using LogPrintVerbosity = RangeValidationTree::LogPrintVerbosity;

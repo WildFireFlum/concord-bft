@@ -33,6 +33,7 @@
 #include "InternalBFTClient.hpp"
 #include "storage/db_interface.h"
 #include "util/filesystem.hpp"
+#include "kv_types.hpp"
 namespace _fs = fs;
 namespace bftEngine::impl {
 using std::chrono::duration_cast;
@@ -99,7 +100,8 @@ class DbCheckpointManager {
                                      std::shared_ptr<bftEngine::impl::PersistentStorage> p,
                                      std::shared_ptr<concordMetrics::Aggregator> aggregator,
                                      const std::function<BlockId()>& getLastBlockIdCb,
-                                     const PrepareCheckpointCallback& prepareCheckpointCb);
+                                     const PrepareCheckpointCallback& prepareCheckpointCb,
+                                     const std::function<void(bool, concord::kvbc::BlockId)>& checkpointInProcessCb);
   std::map<CheckpointId, DbCheckpointMetadata::DbCheckPointDescriptor> getListOfDbCheckpoints() const {
     return dbCheckptMetadata_.dbCheckPoints_;
   }
@@ -122,6 +124,7 @@ class DbCheckpointManager {
   void sendInternalCreateDbCheckpointMsg(const SeqNum& seqNum, bool noop);
   BlockId getLastReachableBlock() const;
   SeqNum getLastStableSeqNum() const;
+  void setCheckpointInProcess(bool, concord::kvbc::BlockId) const;
   void setOnStableSeqNumCb_(std::function<void(SeqNum)> cb) { onStableSeqNumCb_ = cb; }
   void onStableSeqNum(SeqNum s) {
     if (onStableSeqNumCb_) onStableSeqNumCb_(s);
@@ -136,6 +139,10 @@ class DbCheckpointManager {
   }
   inline auto getLastDbCheckpointSeqNum() const { return lastCheckpointSeqNum_; }
   std::string getDiskUsageInfo();
+  // return a map of pair<checkpoint_id, size_on_disk>
+  // checkpoint_id = 0 indicates rocksdb size
+  // only used for apollo test
+  std::map<uint64_t, uint64_t> getDbSize();
 
  private:
   logging::Logger getLogger() {
@@ -161,6 +168,7 @@ class DbCheckpointManager {
   void cleanUp();
   std::function<BlockId()> getLastBlockIdCb_;
   PrepareCheckpointCallback prepareCheckpointCb_;
+  std::function<void(bool, concord::kvbc::BlockId)> checkpointInProcessCb_;
   // get total size recursively
   uint64_t directorySize(const _fs::path& directory, const bool& excludeHardLinks, bool recursive);
   // get checkpoint metadata

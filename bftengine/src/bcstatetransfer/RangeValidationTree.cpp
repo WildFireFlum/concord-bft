@@ -34,9 +34,11 @@ using NodeInfo = RangeValidationTree::NodeInfo;
 using RVTNodePtr = RangeValidationTree::RVTNodePtr;
 
 // uncomment to add debug prints
-#define DO_DEBUG
-#ifdef DO_DEBUG
-#define DEBUG_PRINT(x, y) LOG_DEBUG(x, y)
+// #define RANGE_VALIDATION_TREE_DO_DEBUG
+
+#ifdef RANGE_VALIDATION_TREE_DO_DEBUG
+#undef DEBUG_PRINT
+#define DEBUG_PRINT(x, y) LOG_INFO(x, y)
 #define logInfoVal(x) logInfoVal(x)
 #else
 #define DEBUG_PRINT(x, y)
@@ -174,7 +176,7 @@ void RangeValidationTree::SerializedRVTNode::staticAssert() noexcept {
   static_assert(std::is_same<decltype(RVTNode::child_ids_), std::deque<uint64_t>>::value);
 }
 
-#ifdef DO_DEBUG
+#ifdef __RVT_DO_DEBUG
 void RVBNode::logInfoVal(const std::string& prefix) {
   ostringstream oss;
   oss << prefix << info_.toString() << " (" << info_.id() << ") " << current_value_.toString();
@@ -323,7 +325,16 @@ RangeValidationTree::RangeValidationTree(const logging::Logger& logger,
       leftmost_rvt_node_{},
       logger_(logger),
       fetch_range_size_(fetch_range_size),
-      value_size_(value_size) {
+      value_size_(value_size),
+      metrics_component_{
+          concordMetrics::Component("range_validation_tree", std::make_shared<concordMetrics::Aggregator>())},
+      metrics_{metrics_component_.RegisterGauge("rvt_size_in_bytes", 0),
+               metrics_component_.RegisterGauge("total_rvt_nodes", 0),
+               metrics_component_.RegisterGauge("total_rvt_levels", 0),
+               metrics_component_.RegisterGauge("rvt_min_rvb_id", 0),
+               metrics_component_.RegisterGauge("rvt_max_rvb_id", 0),
+               metrics_component_.RegisterGauge("serialized_rvt_size", 0),
+               metrics_component_.RegisterCounter("rvt_validation_failures")} {
   LOG_INFO(logger_, KVLOG(RVT_K, fetch_range_size_, value_size));
   NodeVal::kNodeValueModulo_ = NodeVal::calcModulo(value_size_);
   ConcordAssert(NodeVal::kNodeValueModulo_ != NodeVal_t(static_cast<signed long>(0)));
@@ -462,19 +473,19 @@ bool RangeValidationTree::validateTreeValues() const noexcept {
   auto iter = id_to_node_.begin();
   ConcordAssert(iter->second != nullptr);
   std::set<uint64_t> validated_ids;
-  size_t skipped{};
 
   do {
     NodeVal sum_of_childs{};
-    auto current_node = iter->second;
 
     if (iter == id_to_node_.end()) {
       break;
     }
+
+    auto current_node = iter->second;
+
     if (current_node->info_.level() <= 1) {
       ++iter;
       validated_ids.insert(current_node->info_.id());
-      ++skipped;
       continue;
     }
 
@@ -507,7 +518,7 @@ bool RangeValidationTree::validateTreeValues() const noexcept {
     ++iter;
   } while (iter != id_to_node_.end());
 
-  // final check: see that we've validated all nodes in tree:
+  // final check: see that we've validated all nodes in tree
   ConcordAssertEQ(validated_ids.size(), id_to_node_.size());
 
   std::set<uint64_t> id_to_node_keys;
@@ -520,15 +531,22 @@ bool RangeValidationTree::validateTreeValues() const noexcept {
   return true;
 }
 
-bool RangeValidationTree::validate() const noexcept { return validateTreeStructure() && validateTreeValues(); }
+bool RangeValidationTree::validate() const noexcept {
+  auto ret = validateTreeStructure();
+  if (!ret) {
+    metrics_.rvt_validation_failures_++;
+    return false;
+  }
+  ret = validateTreeValues();
+  if (!ret) {
+    metrics_.rvt_validation_failures_++;
+  }
+  return true;
+}
 
 void RangeValidationTree::printToLog(LogPrintVerbosity verbosity, string&& user_label) const noexcept {
   if (!root_ or totalNodes() == 0) {
     LOG_INFO(logger_, "Empty RVT");
-    return;
-  }
-  if (totalNodes() > kMaxNodesToPrint) {
-    LOG_WARN(logger_, "Huge tree so would not log");
     return;
   }
   std::ostringstream oss;
@@ -539,30 +557,33 @@ void RangeValidationTree::printToLog(LogPrintVerbosity verbosity, string&& user_
       << ", max_rvb_index_=" << max_rvb_index_ << ", RVT_K=" << RVT_K << ", FRS=" << fetch_range_size_
       << ", value_size=" << value_size_;
 
+  // For large trees, print only basic info without structure
+  if ((totalNodes() > kMaxNodesToPrintStructure) || (verbosity == LogPrintVerbosity::SUMMARY)) {
+    LOG_INFO(logger_, oss.str());
+    return;
+  }
+
   oss << " ,Structure:";
   queue<RVTNodePtr> q;
   q.push(root_);
   while (q.size()) {
     auto& node = q.front();
-    q.pop();
     oss << node->info_.toString() << " ";
 
-    if (verbosity == LogPrintVerbosity::DETAILED) {
-      oss << ", level=" << node->info_.level() << ", rvb_index=" << node->info_.rvb_index()
-          << ", insertion_counter_=" << node->insertion_counter_
-          << ", current_value_=" << node->current_value_.toString()
-          << ", min_cid=" << NodeInfo(node->minChildId()).toString()
-          << ", max_cid=" << NodeInfo(node->maxChildId()).toString();
+    oss << ", level=" << node->info_.level() << ", rvb_index=" << node->info_.rvb_index()
+        << ", insertion_counter_=" << node->insertion_counter_ << ", current_value_=" << node->current_value_.toString()
+        << ", min_cid=" << NodeInfo(node->minChildId()).toString()
+        << ", max_cid=" << NodeInfo(node->maxChildId()).toString();
 
-      // Keep for debugging
-      // ConcordAssert(node->hasChilds());
-      // oss << " child_ids:";
-      // for (const auto& cid : node->child_ids_) {
-      //   oss << NodeInfo(cid).toString();
-      // }
-    }
+    // Keep for debugging
+    // ConcordAssert(node->hasChilds());
+    // oss << " child_ids:";
+    // for (const auto& cid : node->child_ids_) {
+    //   oss << NodeInfo(cid).toString();
+    // }
     oss << "|";
     if (node->info_.level() == 1) {
+      q.pop();
       continue;
     }
 
@@ -573,6 +594,7 @@ void RangeValidationTree::printToLog(LogPrintVerbosity verbosity, string&& user_
       ConcordAssert(iter != id_to_node_.end());
       q.push(iter->second);
     }
+    q.pop();
   }
   LOG_INFO(logger_, oss.str());
 }
@@ -782,8 +804,8 @@ void RangeValidationTree::addInternalNode(const RVTNodePtr& node_to_add) {
     return;
   }
 
-  /* If we are here, we might need to create multiple levels, dependend on belonging of current_node to an RVB group.
-    tree is aligned to rvb index 1.
+  /* If we are here, we might need to create multiple levels, dependent on belonging of current_node to an RVB group.
+    Tree is aligned to rvb index 1.
     There might be a tree like this (RVT_K=4)
     L3        1
     L2   33			    49
@@ -862,13 +884,12 @@ void RangeValidationTree::removeAndUpdateInternalNodes(const RVTNodePtr& rvt_nod
     cur_node = parent_node;
   }
 
-  if (cur_node == root_) {
-    root_->substractValue(value);
+  ConcordAssertEQ(cur_node, root_);
+  root_->substractValue(value);
 
-    if (root_->hasNoChilds()) {
-      setNewRoot(nullptr);
-      return;
-    }
+  if (root_->hasNoChilds()) {
+    setNewRoot(nullptr);
+    return;
   }
 
   // Loop 2
@@ -994,6 +1015,11 @@ void RangeValidationTree::addRightNode(const RVBId rvb_id, const char* data, siz
   if (min_rvb_index_ == 0) {
     min_rvb_index_ = rvb_index;
   }
+  metrics_.rvt_size_in_bytes_.Get().Set(id_to_node_.size() * (sizeof(uint64_t) + sizeof(RVTNode)));
+  metrics_.rvt_min_rvb_id_.Get().Set(getMinRvbId());
+  metrics_.rvt_max_rvb_id_.Get().Set(getMaxRvbId());
+  metrics_.total_rvt_nodes_.Get().Set(totalNodes());
+  metrics_.total_rvt_levels_.Get().Set(totalLevels());
   LOG_TRACE(logger_, KVLOG(min_rvb_index_, max_rvb_index_, rvb_id));
 }
 
@@ -1018,6 +1044,11 @@ void RangeValidationTree::removeLeftNode(const RVBId rvb_id, const char* data, s
   } else {
     ++min_rvb_index_;
   }
+  metrics_.rvt_size_in_bytes_.Get().Set(id_to_node_.size() * (sizeof(uint64_t) + sizeof(RVTNode)));
+  metrics_.rvt_min_rvb_id_.Get().Set(getMinRvbId());
+  metrics_.rvt_max_rvb_id_.Get().Set(getMaxRvbId());
+  metrics_.total_rvt_nodes_.Get().Set(totalNodes());
+  metrics_.total_rvt_levels_.Get().Set(totalLevels());
   LOG_TRACE(logger_, KVLOG(min_rvb_index_, max_rvb_index_, rvb_id));
 }
 
@@ -1057,6 +1088,7 @@ std::ostringstream RangeValidationTree::getSerializedRvbData() const {
   }
 
   LOG_TRACE(logger_, KVLOG(os.str().size()));
+  metrics_.serialized_rvt_size_.Get().Set(os.str().size());
   LOG_TRACE(logger_, "Nodes:" << totalNodes() << " root value:" << root_->current_value_.toString());
   return os;
 }
@@ -1089,7 +1121,6 @@ bool RangeValidationTree::setSerializedRvbData(std::istringstream& is) {
   }
 
   // populate id_to_node_ map
-  id_to_node_.reserve(data.total_nodes);
   uint64_t min_rvb_index{std::numeric_limits<uint64_t>::max()}, max_rvb_index{0};
   for (uint64_t i = 0; i < data.total_nodes; i++) {
     auto node = RVTNode::createFromSerialized(is);
@@ -1144,6 +1175,12 @@ bool RangeValidationTree::setSerializedRvbData(std::istringstream& is) {
     return false;
   }
 
+  metrics_.rvt_size_in_bytes_.Get().Set(id_to_node_.size() * (sizeof(uint64_t) + sizeof(RVTNode)));
+  metrics_.total_rvt_nodes_.Get().Set(totalNodes());
+  metrics_.total_rvt_levels_.Get().Set(totalLevels());
+  metrics_.rvt_min_rvb_id_.Get().Set(getMinRvbId());
+  metrics_.rvt_max_rvb_id_.Get().Set(getMaxRvbId());
+  metrics_.serialized_rvt_size_.Get().Set(is.str().size());
   LOG_TRACE(logger_, "Nodes:" << totalNodes() << " root value:" << root_->current_value_.toString());
   return true;
 }

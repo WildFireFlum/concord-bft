@@ -19,6 +19,9 @@
 
 #ifdef USE_LOG4CPP
 
+#undef LOG4CPLUS_MACRO_FUNCTION
+#define LOG4CPLUS_MACRO_FUNCTION() __FUNCTION__
+
 namespace logging {
 
 typedef log4cplus::Logger Logger;
@@ -26,7 +29,7 @@ typedef log4cplus::Logger Logger;
 std::string get(const std::string& key);
 
 }  // namespace logging
-#define LOG_FUNC(s) __func__ << "|" << s
+#define LOG_FUNC(s) s << " | [SQ:" << std::to_string(getSeq()) << "]"
 
 #define LOG_TRACE(l, s) LOG4CPLUS_TRACE(l, LOG_FUNC(s))
 #define LOG_DEBUG(l, s) LOG4CPLUS_DEBUG(l, LOG_FUNC(s))

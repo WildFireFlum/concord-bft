@@ -23,6 +23,7 @@
 
 #include "SimpleBCStateTransfer.hpp"
 #include "categorization/kv_blockchain.h"
+#include "db_interfaces.h"
 
 using namespace concord::kvbc;
 
@@ -37,24 +38,29 @@ class Block {
   static uint32_t getMaxTotalBlockSize() { return kMaxBlockSize_; }
   static void setMaxTotalBlockSize(uint32_t size) { kMaxBlockSize_ = size; }
 
-  static std::shared_ptr<Block> createFromData(uint32_t dataSize,
-                                               const char* data,
-                                               uint64_t blockId,
-                                               StateTransferDigest& digestPrev) {
+  struct BlockDeleter {
+    void operator()(Block* blk) {
+      char* buff = reinterpret_cast<char*>(blk);
+      delete[] buff;
+    }
+  };
+
+  static Block* createFromData(uint32_t dataSize, const char* data, uint64_t blockId, StateTransferDigest& digestPrev) {
     auto totalBlockSize = calcTotalBlockSize(dataSize);
     ConcordAssertLE(totalBlockSize, kMaxBlockSize_);
-    Block* blk = reinterpret_cast<Block*>(new char[totalBlockSize]);
-    return std::shared_ptr<Block>(blk->initBlock(data, dataSize, totalBlockSize, blockId, digestPrev));
+    char* buff = new char[totalBlockSize];
+    Block* blk = reinterpret_cast<Block*>(buff);
+    blk->initBlock(data, dataSize, totalBlockSize, blockId, digestPrev);
+    return blk;
   }
 
-  static std::shared_ptr<Block> createFromBlock(const char* blk, uint32_t blkSize) {
+  static Block* createFromBlock(const char* blk, uint32_t blkSize) {
     ConcordAssertLE(blkSize, kMaxBlockSize_);
-    char* buff = static_cast<char*>(new char[blkSize]);
+    ConcordAssertGT(blkSize, 0);
+    auto buff = new char[blkSize];
     memcpy(buff, blk, blkSize);
-    return std::shared_ptr<Block>(reinterpret_cast<Block*>(buff));
+    return reinterpret_cast<Block*>(buff);
   }
-
-  static void free(Block* i) { std::free(static_cast<void*>(i)); }
 
   StateTransferDigest digestPrev;  // For block ID N, this is the digest calculated on block ID N-1
   uint32_t actualDataSize;
@@ -67,26 +73,28 @@ class Block {
   static uint32_t calcDataSize(uint32_t totalSize) { return totalSize - sizeof(Block) + 1; }
   static uint32_t kMaxBlockSize_;
 
-  Block* initBlock(
+  void initBlock(
       const char* data, uint32_t dataSize, uint32_t totalBlockSize, uint64_t blockId, StateTransferDigest& digestPrev) {
     this->actualDataSize = dataSize;
     this->totalBlockSize = totalBlockSize;
     this->blockId = blockId;
     memcpy(this->data, data, dataSize);
     this->digestPrev = digestPrev;
-    return this;
   }
 };
 
 uint32_t Block::kMaxBlockSize_ = 0;
 #pragma pack(pop)
 
-class TestAppState : public IAppState {
+class TestAppState : public IAppState, public IBlocksDeleter {
   static constexpr uint32_t blockIoMinLatencyMs = 1;
   static constexpr uint32_t blockIoMaxLatencyMs = 4;
 
  public:
-  TestAppState() : last_block_(getGenesisBlockNum()){};
+  TestAppState()
+      : last_block_id_(concord::kvbc::INITIAL_GENESIS_BLOCK_ID),
+        genesis_block_id_{last_block_id_},
+        last_reachable_block_id_{last_block_id_} {};
 
   bool hasBlock(uint64_t blockId) const override {
     std::lock_guard<std::mutex> lg(mtx);
@@ -99,6 +107,15 @@ class TestAppState : public IAppState {
                 uint32_t outBlockMaxSize,
                 uint32_t* outBlockActualSize) const override {
     std::lock_guard<std::mutex> lg(mtx);
+
+    if (blockId == concord::kvbc::INITIAL_GENESIS_BLOCK_ID) {
+      // The genesis block has the string "vmware blockchain" inside
+      static constexpr char genesisBlockData[] = "vmware blockchain";
+      auto len = strlen(genesisBlockData);
+      memcpy(outBlock, genesisBlockData, len);
+      *outBlockActualSize = len;
+      return true;
+    }
     auto it = blocks_.find(blockId);
     if (it == blocks_.end()) {
       return false;
@@ -151,9 +168,16 @@ class TestAppState : public IAppState {
   bool putBlock(const uint64_t blockId, const char* block, const uint32_t blockSize, bool lastBlock) override {
     std::lock_guard<std::mutex> lg(mtx);
     ConcordAssertLE(blockSize, Block::getMaxTotalBlockSize());
-    const auto blk = Block::createFromBlock(block, blockSize);
-    if (blockId > last_block_) last_block_ = blockId;
+    const std::shared_ptr<Block> blk(Block::createFromBlock(block, blockSize), Block::BlockDeleter());
+    if (blockId > last_block_id_) {
+      last_block_id_ = blockId;
+    }
     blocks_.emplace(blockId, std::move(blk));
+    if (last_reachable_block_id_ + 1 == blockId) {
+      while (blocks_.find(last_reachable_block_id_ + 1) != blocks_.end()) {
+        ++last_reachable_block_id_;
+      }
+    }
     return true;
   }
 
@@ -174,17 +198,45 @@ class TestAppState : public IAppState {
     return future;
   }
 
-  uint64_t getLastReachableBlockNum() const override { return last_block_; }
-  uint64_t getGenesisBlockNum() const override { return concord::kvbc::INITIAL_GENESIS_BLOCK_ID; }
-  uint64_t getLastBlockNum() const override { return last_block_; };
+  uint64_t getLastReachableBlockNum() const override { return last_reachable_block_id_; }
+  uint64_t getGenesisBlockNum() const override { return genesis_block_id_; }
+  uint64_t getLastBlockNum() const override { return last_block_id_; };
 
   size_t postProcessUntilBlockId(uint64_t maxBlockId) override {
     sleepForRandomtime(1, 2);
     return 0;
   }
 
+  void deleteGenesisBlock() override {
+    if (genesis_block_id_ == 0) {
+      throw std::logic_error{"Cannot delete a block range from an empty blockchain"};
+    }
+    if (!blocks_.empty()) {
+      blocks_.erase(genesis_block_id_);
+      ++genesis_block_id_;
+    }
+  }
+
+  // until is the 1st block which is not deleted.
+  BlockId deleteBlocksUntil(BlockId until) override {
+    if (genesis_block_id_ == 0) {
+      throw std::logic_error{"Cannot delete a block range from an empty blockchain"};
+    } else if (until <= genesis_block_id_) {
+      throw std::invalid_argument{"Invalid 'until' value passed to deleteBlocksUntil()"};
+    }
+    for (size_t i{genesis_block_id_}; i < until; ++i) {
+      deleteGenesisBlock();
+    }
+    return until - 1;
+  }
+
+  // This is not implemented
+  void deleteLastReachableBlock() override {}
+
  private:
-  uint64_t last_block_;
+  uint64_t last_block_id_;
+  uint64_t genesis_block_id_;
+  uint64_t last_reachable_block_id_;
   std::unordered_map<uint64_t, std::shared_ptr<Block>> blocks_;
   mutable std::mutex mtx;
 

@@ -14,6 +14,7 @@
 #pragma once
 
 #include "updates.h"
+#include "blockchain_misc.hpp"
 #include "rocksdb/native_client.h"
 #include "blocks.h"
 #include "blockchain.h"
@@ -38,14 +39,6 @@ namespace concord::kvbc::categorization {
 
 class KeyValueBlockchain {
   using VersionedRawBlock = std::pair<BlockId, std::optional<categorization::RawBlockData>>;
-
- public:
-  // Key or value converter interface.
-  // Allows users to convert keys or values to any format that is appropriate.
-  using Converter = std::function<std::string(std::string&&)>;
-
-  // The noop converter returns the input string as is, without modifying it.
-  static const Converter kNoopConverter;
 
  public:
   // Creates a key-value blockchain.
@@ -95,6 +88,18 @@ class KeyValueBlockchain {
                                         const std::string& category_id,
                                         const BlockMerkleOutput& updates_info) const;
 
+  std::set<std::string> getStaleActiveKeys(BlockId block_id,
+                                           const std::string& category_id,
+                                           const ImmutableOutput& updates_info) const;
+
+  std::set<std::string> getStaleActiveKeys(BlockId block_id,
+                                           const std::string& category_id,
+                                           const VersionedOutput& updates_info) const;
+
+  std::set<std::string> getStaleActiveKeys(BlockId block_id,
+                                           const std::string& category_id,
+                                           const BlockMerkleOutput& updates_info) const;
+
   /////////////////////// Read interface ///////////////////////
 
   // Gets the value of a key by the exact blockVersion.
@@ -123,6 +128,7 @@ class KeyValueBlockchain {
 
   // Get a map of category_id and stale keys for `block_id`
   std::map<std::string, std::vector<std::string>> getBlockStaleKeys(BlockId block_id) const;
+  std::map<std::string, std::set<std::string>> getStaleActiveKeys(BlockId block_id) const;
 
   // Get a map from category ID -> type for all known categories in the blockchain.
   const std::map<std::string, CATEGORY_TYPE>& blockchainCategories() const { return category_types_; }
@@ -143,43 +149,10 @@ class KeyValueBlockchain {
   // Precondition3: `block_id_at_checkpoint` <= getLastReachableBlockId()
   void trimBlocksFromSnapshot(BlockId block_id_at_checkpoint);
 
-  // Computes and persists the public state hash by:
-  //  h0 = hash("")
-  //  h1 = hash(h0 || hash(k1) || v1)
-  //  h2 = hash(h1 || hash(k2) || v2)
-  //  ...
-  //  hN = hash(hN-1 || hash(kN) || vN)
-  //
-  // This method is supposed to be called on DB snapshots only and not on the actual blockchain.
-  // Precondition: The current KeyValueBlockchain instance points to a DB snapshot.
-  void computeAndPersistPublicStateHash(BlockId checkpoint_block_id, const Converter& value_converter = kNoopConverter);
-
-  // Returns the public state keys as of the current point in the blockchain's history.
-  // Returns std::nullopt if no public keys have been persisted.
-  std::optional<PublicStateKeys> getPublicStateKeys() const;
-
-  // Iterate over all public key values, calling the given function multiple times with two parameters:
-  // * key
-  // * value
-  void iteratePublicStateKeyValues(const std::function<void(std::string&&, std::string&&)>& f) const;
-
-  // Iterate over public key values from the key after `after_key`, calling the given function multiple times with two
-  // parameters:
-  // * key
-  // * value
-  //
-  // If `after_key` is not a public key, false is returned and no iteration is done (no calls to `f`). Else, iteration
-  // is done and the returned value is true, even if there are 0 public keys to actually iterate.
-  bool iteratePublicStateKeyValues(const std::function<void(std::string&&, std::string&&)>& f,
-                                   const std::string& after_key) const;
-
   // The key used in the default column family for persisting the current public state hash.
   static std::string publicStateHashKey();
 
  private:
-  bool iteratePublicStateKeyValuesImpl(const std::function<void(std::string&&, std::string&&)>& f,
-                                       const std::optional<std::string>& after_key) const;
-
   BlockId addBlock(CategoryInput&& category_updates, concord::storage::rocksdb::NativeWriteBatch& write_batch);
 
   // tries to link the state transfer chain to the main blockchain
@@ -318,12 +291,10 @@ class KeyValueBlockchain {
     const VersionedRawBlock& getLastRawBlock(KeyValueBlockchain& kvbc) { return kvbc.last_raw_block_; }
   };  // namespace concord::kvbc::categorization
 
-  std::string getPruningStatus();
-
   void setAggregator(std::shared_ptr<concordMetrics::Aggregator> aggregator) {
     aggregator_ = aggregator;
     delete_metrics_comp_.SetAggregator(aggregator_);
-    add_metrics_comp_.SetAggregator(aggregator);
+    add_metrics_comp_.SetAggregator(aggregator_);
   }
   friend struct KeyValueBlockchain_tester;
 

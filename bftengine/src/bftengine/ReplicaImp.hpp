@@ -44,6 +44,7 @@
 #include <ccron/ticks_generator.hpp>
 #include "EpochManager.hpp"
 #include "PerfMetrics.hpp"
+#include "ControlStateManager.hpp"
 
 namespace preprocessor {
 class PreProcessResultMsg;
@@ -177,7 +178,7 @@ class ReplicaImp : public InternalReplicaApi, public ReplicaForStateTransfer {
 
   // last known stable checkpoint of each peer replica.
   // We sometimes delete checkpoints before lastExecutedSeqNum
-  std::map<ReplicaId, CheckpointMsg*> tableOfStableCheckpoints;
+  std::map<ReplicaId, std::shared_ptr<CheckpointMsg>> tableOfStableCheckpoints;
 
   // managing information about the clients
   std::shared_ptr<ClientsManager> clientsManager;
@@ -314,6 +315,10 @@ class ReplicaImp : public InternalReplicaApi, public ReplicaForStateTransfer {
   CounterHandle metric_received_restart_proof_;
   PerfMetric<uint64_t> metric_consensus_duration_;
   PerfMetric<uint64_t> metric_post_exe_duration_;
+  PerfMetric<uint64_t> metric_core_exe_func_duration_;
+  PerfMetric<uint64_t> metric_consensus_end_to_core_exe_duration_;
+  PerfMetric<uint64_t> metric_post_exe_thread_idle_time_;
+  PerfMetric<uint64_t> metric_post_exe_thread_active_time_;
   PerfMetric<std::string> metric_primary_batching_duration_;
   //*****************************************************
   RollingAvgAndVar consensus_time_;
@@ -643,6 +648,7 @@ class ReplicaImp : public InternalReplicaApi, public ReplicaForStateTransfer {
     virtual void release() override { delete this; }
 
     virtual void execute() override {
+      bftEngine::ControlStateManager::instance().waitForPruningIfNeeded();
       MDC_PUT(MDC_REPLICA_ID_KEY, std::to_string(parent_.config_.replicaId));
       MDC_PUT(MDC_THREAD_KEY, "post-execution-thread");
       SCOPED_MDC_SEQ_NUM(std::to_string(ppMsg_->seqNumber()));

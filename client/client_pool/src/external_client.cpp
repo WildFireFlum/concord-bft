@@ -54,11 +54,11 @@ void ConcordClient::setStatics(uint16_t required_num_of_replicas,
   }
 }
 
-ConcordClient::ConcordClient(int client_id)
+ConcordClient::ConcordClient(int client_id, std::shared_ptr<concordMetrics::Aggregator> aggregator)
     : logger_(logging::getLogger("concord.client.client_pool.external_client")),
       clientRequestExecutionResult_(OperationResult::SUCCESS) {
   client_id_ = client_id;
-  CreateClient();
+  CreateClient(aggregator);
 }
 
 ConcordClient::~ConcordClient() noexcept = default;
@@ -204,7 +204,11 @@ std::pair<int32_t, ConcordClient::PendingReplies> ConcordClient::SendPendingRequ
           pending_reply.cb(move(response));
           LOG_INFO(logger_,
                    "Request processing completed; return response through the callback"
-                       << KVLOG(client_id_, batch_cid, pending_reply.cid, received_reply_entry.second.result));
+                       << KVLOG(client_id_,
+                                batch_cid,
+                                received_reply_seq_num,
+                                pending_reply.cid,
+                                received_reply_entry.second.result));
         } else {
           // Used for testing only
           if (data_size > pending_reply.lengthOfReplyBuffer) {
@@ -216,8 +220,11 @@ std::pair<int32_t, ConcordClient::PendingReplies> ConcordClient::SendPendingRequ
           pending_reply.actualReplyLength = data_size;
           pending_reply.opResult = static_cast<bftEngine::OperationResult>(received_reply_entry.second.result);
           LOG_INFO(logger_,
-                   "Request processing completed"
-                       << KVLOG(client_id_, batch_cid, pending_reply.cid, received_reply_entry.second.result));
+                   "Request processing completed" << KVLOG(client_id_,
+                                                           batch_cid,
+                                                           received_reply_seq_num,
+                                                           pending_reply.cid,
+                                                           received_reply_entry.second.result));
         }
       }
     }
@@ -259,6 +266,7 @@ BaseCommConfig* ConcordClient::CreateCommConfig() const {
                           selfId,
                           pool_config_.tls_certificates_folder_path,
                           pool_config_.tls_cipher_suite_list,
+                          pool_config_.use_unified_certificates,
                           nullptr,
                           secretData};
 }
@@ -340,12 +348,13 @@ void ConcordClient::CreateClientConfig(BaseCommConfig* comm_config, ClientConfig
   }
 }
 
-void ConcordClient::CreateClient() {
+void ConcordClient::CreateClient(std::shared_ptr<concordMetrics::Aggregator> aggregator) {
   ClientConfig client_config;
   auto [comm_config, comm_layer] = CreateCommConfigAndCommChannel();
   CreateClientConfig(comm_config, client_config);
   LOG_DEBUG(logger_, "Creating new bft-client instance" << KVLOG(client_id_));
-  auto new_client = std::unique_ptr<bft::client::Client>{new bft::client::Client(comm_layer, client_config)};
+  auto new_client =
+      std::unique_ptr<bft::client::Client>{new bft::client::Client(comm_layer, client_config, aggregator)};
   new_client_ = std::move(new_client);
   seqGen_ = bftEngine::SeqNumberGeneratorForClientRequests::createSeqNumberGeneratorForClientRequests();
   LOG_INFO(logger_, "Client creation succeeded" << KVLOG(client_id_));

@@ -12,7 +12,6 @@
 
 #include "gtest/gtest.h"
 #include <bftengine/ControlStateManager.hpp>
-#include <bftengine/ControlStateManager.hpp>
 #include "NullStateTransfer.hpp"
 #include "categorization/kv_blockchain.h"
 #include "categorization/updates.h"
@@ -37,6 +36,7 @@ using concord::kvbc::BlockId;
 using namespace concord::kvbc;
 using namespace concord::kvbc::categorization;
 using namespace concord::kvbc::pruning;
+
 namespace {
 const NodeIdType replica_0 = 0;
 const NodeIdType replica_1 = 1;
@@ -441,16 +441,18 @@ class TestStorage : public IReader, public IBlockAdder, public IBlocksDeleter {
     return lastDeletedBlock;
   }
 
+  void deleteLastReachableBlock() override { return bc_.deleteLastReachableBlock(); }
+
   void setGenesisBlockId(BlockId bid) { mockGenesisBlockId = bid; }
 
  private:
-  KeyValueBlockchain bc_;
+  concord::kvbc::categorization::KeyValueBlockchain bc_;
   std::optional<BlockId> mockGenesisBlockId = {};
 };
 
 class TestStateTransfer : public bftEngine::impl::NullStateTransfer {
  public:
-  void addOnTransferringCompleteCallback(std::function<void(uint64_t)> callback,
+  void addOnTransferringCompleteCallback(const std::function<void(uint64_t)> &callback,
                                          StateTransferCallBacksPriorities priority) override {
     callback_ = callback;
   }

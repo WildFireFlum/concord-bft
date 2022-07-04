@@ -15,12 +15,16 @@
 #include "client/clientservice/request_service.hpp"
 #include "client/concordclient/concord_client.hpp"
 #include "concord_client_request.pb.h"
+#include "client/thin-replica-client/trace_contexts.hpp"
 
+using namespace client::thin_replica_client;
 using namespace vmware::concord::client::concord_client_request::v1;
 
 namespace concord::client::clientservice {
 
 namespace requestservice {
+
+const std::string kClientInstanceId = "client_instance_id";
 
 void RequestServiceCallData::proceed() {
   if (state_ == FINISH) {
@@ -99,35 +103,55 @@ void RequestServiceCallData::sendToConcordClient() {
       switch (std::get<uint32_t>(send_result)) {
         case (static_cast<uint32_t>(bftEngine::OperationResult::INVALID_REQUEST)):
           LOG_INFO(logger, "Request failed with INVALID_ARGUMENT error for cid=" << req_config.correlation_id);
-          status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid argument");
+          status = grpc::Status(
+              grpc::StatusCode::INVALID_ARGUMENT,
+              ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_INVALID_REQUEST));
           break;
         case (static_cast<uint32_t>(bftEngine::OperationResult::NOT_READY)):
           LOG_INFO(logger, "Request failed with NOT_READY error for cid=" << req_config.correlation_id);
-          status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "No clients connected to the replicas");
+          status =
+              grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                           ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_NOT_READY));
           break;
         case (static_cast<uint32_t>(bftEngine::OperationResult::TIMEOUT)):
           LOG_INFO(logger, "Request failed with TIMEOUT error for cid=" << req_config.correlation_id);
-          status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "Timeout");
+          status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_TIMEOUT));
           break;
         case (static_cast<uint32_t>(bftEngine::OperationResult::EXEC_DATA_TOO_LARGE)):
           LOG_INFO(logger, "Request failed with EXEC_DATA_TOO_LARGE error for cid=" << req_config.correlation_id);
-          status = grpc::Status(grpc::StatusCode::INTERNAL, "Execution data too large");
+          status = grpc::Status(
+              grpc::StatusCode::INTERNAL,
+              ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_EXEC_DATA_TOO_LARGE));
           break;
         case (static_cast<uint32_t>(bftEngine::OperationResult::EXEC_DATA_EMPTY)):
           LOG_INFO(logger, "Request failed with EXEC_DATA_EMPTY error for cid=" << req_config.correlation_id);
-          status = grpc::Status(grpc::StatusCode::INTERNAL, "Execution data is empty");
+          status = grpc::Status(
+              grpc::StatusCode::INTERNAL,
+              ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_EXEC_DATA_EMPTY));
           break;
         case (static_cast<uint32_t>(bftEngine::OperationResult::CONFLICT_DETECTED)):
           LOG_INFO(logger, "Request failed with CONFLICT_DETECTED error for cid=" << req_config.correlation_id);
-          status = grpc::Status(grpc::StatusCode::ABORTED, "Aborted");
+          status = grpc::Status(
+              grpc::StatusCode::ABORTED,
+              ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_CONFLICT_DETECTED));
           break;
         case (static_cast<uint32_t>(bftEngine::OperationResult::OVERLOADED)):
           LOG_INFO(logger, "Request failed with OVERLOADED error for cid=" << req_config.correlation_id);
-          status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "All clients occupied");
+          status =
+              grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                           ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_OVERLOADED));
+          break;
+        case (static_cast<uint32_t>(bftEngine::OperationResult::EXEC_ENGINE_REJECT_ERROR)):
+          LOG_INFO(logger, "Request failed with EXEC_ENGINE_REJECT_ERROR error for cid=" << req_config.correlation_id);
+          status = grpc::Status(
+              grpc::StatusCode::ABORTED,
+              ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_EXECUTION_ENGINE_REJECTED));
           break;
         default:
           LOG_INFO(logger, "Request failed with INTERNAL error for cid=" << req_config.correlation_id);
-          status = grpc::Status(grpc::StatusCode::INTERNAL, "Internal error");
+          status = grpc::Status(grpc::StatusCode::INTERNAL,
+                                ConcordErrorMessage_Name(vmware::concord::client::request::v1::CONCORD_ERROR_INTERNAL));
           break;
       }
       this->populateResult(status);
@@ -153,10 +177,16 @@ void RequestServiceCallData::sendToConcordClient() {
     this->populateResult(grpc::Status::OK);
   };
 
+  auto tracer = opentracing::Tracer::Global();
+  auto parent_span = TraceContexts::ExtractSpanFromMetadata(*tracer, ctx_);
+
   if (request_.read_only()) {
     bft::client::ReadConfig config;
     config.request = req_config;
-    auto span = opentracing::Tracer::Global()->StartSpan("send_ro", {});
+    auto span = opentracing::Tracer::Global()->StartSpan("send_ro", {opentracing::ChildOf(parent_span.get())});
+    if (span) {
+      span->SetTag(kClientInstanceId, client_->getSubscriptionId());
+    }
     std::ostringstream carrier;
     opentracing::Tracer::Global()->Inject(span->context(), carrier);
     config.request.span_context = carrier.str();
@@ -164,7 +194,10 @@ void RequestServiceCallData::sendToConcordClient() {
   } else {
     bft::client::WriteConfig config;
     config.request = req_config;
-    auto span = opentracing::Tracer::Global()->StartSpan("send", {});
+    auto span = opentracing::Tracer::Global()->StartSpan("send", {opentracing::ChildOf(parent_span.get())});
+    if (span) {
+      span->SetTag(kClientInstanceId, client_->getSubscriptionId());
+    }
     std::ostringstream carrier;
     opentracing::Tracer::Global()->Inject(span->context(), carrier);
     config.request.span_context = carrier.str();

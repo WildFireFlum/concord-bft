@@ -34,6 +34,7 @@ void RequestHandler::execute(IRequestsHandler::ExecutionRequestsQueue& requests,
                              std::optional<Timestamp> timestamp,
                              const std::string& batchCid,
                              concordUtils::SpanWrapper& parent_span) {
+  bool has_pruning_request = false;
   for (auto& req : requests) {
     if (req.flags & KEY_EXCHANGE_FLAG) {
       KeyExchangeMsg ke = KeyExchangeMsg::deserializeMsg(req.request, req.requestSize);
@@ -51,6 +52,7 @@ void RequestHandler::execute(IRequestsHandler::ExecutionRequestsQueue& requests,
     } else if (req.flags & MsgFlag::RECONFIG_FLAG) {
       ReconfigurationRequest rreq;
       deserialize(std::vector<std::uint8_t>(req.request, req.request + req.requestSize), rreq);
+      has_pruning_request = std::holds_alternative<concord::messages::PruneRequest>(rreq.command);
       ReconfigurationResponse rsi_res = reconfig_dispatcher_.dispatch(rreq, req.executionSequenceNum, timestamp);
       // in case of read request return only a success part of and replica specific info in the response
       // and the rest as additional data, since it may differ between replicas
@@ -122,6 +124,7 @@ void RequestHandler::execute(IRequestsHandler::ExecutionRequestsQueue& requests,
           std::vector<std::uint8_t>(req.request, req.request + req.requestSize), createDbChkPtMsg);
       if (!createDbChkPtMsg.noop) {
         const auto& lastStableSeqNum = DbCheckpointManager::instance().getLastStableSeqNum();
+        std::optional blockId(DbCheckpointManager::instance().getLastReachableBlock());
         if (lastStableSeqNum == static_cast<SeqNum>(createDbChkPtMsg.seqNum)) {
           DbCheckpointManager::instance().createDbCheckpointAsync(createDbChkPtMsg.seqNum, timestamp, std::nullopt);
         } else {
@@ -130,7 +133,7 @@ void RequestHandler::execute(IRequestsHandler::ExecutionRequestsQueue& requests,
           // seq num because checkpoint msg certificate is stored on stable seq num and is used for intergrity
           // check of db snapshots
           const auto& seqNumToCreateSanpshot = createDbChkPtMsg.seqNum;
-          std::optional blockId(DbCheckpointManager::instance().getLastReachableBlock());
+          DbCheckpointManager::instance().setCheckpointInProcess(true, *blockId);
           DbCheckpointManager::instance().setOnStableSeqNumCb_([seqNumToCreateSanpshot, timestamp, blockId](SeqNum s) {
             if (s == static_cast<SeqNum>(seqNumToCreateSanpshot))
               DbCheckpointManager::instance().createDbCheckpointAsync(seqNumToCreateSanpshot, timestamp, blockId);
@@ -168,11 +171,15 @@ void RequestHandler::execute(IRequestsHandler::ExecutionRequestsQueue& requests,
       req.outActualReplySize = 1;
       continue;
     }
-    if (bftEngine::ControlStateManager::instance().getPruningProcessStatus()) {
+    if (has_pruning_request) {
+      // Stop pricessing requests after pruning has started (relevant for both, sync and async execution)
       req.outActualReplySize = 0;
     }
   }
-  if (bftEngine::ControlStateManager::instance().getPruningProcessStatus()) {
+  if (has_pruning_request) {
+    // Dont waste your time in calling to the user command handler. In case of sync execution all requests were marked
+    // as not for execution. In xase of async execution, the set of requests contains only special requests and not user
+    // requests
     return;
   }
   if (userRequestsHandler_) {
@@ -193,5 +200,12 @@ void RequestHandler::preExecute(IRequestsHandler::ExecutionRequest& req,
                                 const std::string& batchCid,
                                 concordUtils::SpanWrapper& parent_span) {
   if (userRequestsHandler_) return userRequestsHandler_->preExecute(req, timestamp, batchCid, parent_span);
+}
+
+void RequestHandler::setPersistentStorage(
+    const std::shared_ptr<bftEngine::impl::PersistentStorage>& persistent_storage) {
+  for (auto& rh : reconfig_handler_) {
+    rh->setPersistentStorage(persistent_storage);
+  }
 }
 }  // namespace bftEngine

@@ -29,7 +29,7 @@ KeyExchangeManager::KeyExchangeManager(InitData* id)
       quorumSize_{static_cast<uint32_t>(2 * ReplicaConfig::instance().fVal + ReplicaConfig::instance().cVal)},
       publicKeys_{clusterSize_},
       private_keys_(id->secretsMgr),
-      clientsPublicKeys_(),
+      clientsPublicKeys_(ReplicaConfig::instance().get("concord.bft.keyExchage.clientKeysEnabled", true)),
       client_(id->cl),
       multiSigKeyHdlr_(id->kg),
       clientPublicKeyStore_{id->cpks},
@@ -38,10 +38,6 @@ KeyExchangeManager::KeyExchangeManager(InitData* id)
   registerForNotification(id->ke);
   notifyRegistry();
   if (!ReplicaConfig::instance().getkeyExchangeOnStart()) initial_exchange_ = true;
-  if (!ReplicaConfig::instance().get("concord.bft.keyExchage.clientKeysEnabled", true)) {
-    LOG_INFO(KEY_EX_LOG, "Publish client keys is disabled");
-    clientsPublicKeys_.published_ = true;
-  }
 }
 
 void KeyExchangeManager::initMetrics(std::shared_ptr<concordMetrics::Aggregator> a, std::chrono::seconds interval) {
@@ -137,18 +133,27 @@ void KeyExchangeManager::loadPublicKeys() {
   // after State Transfer public keys for all replicas are expected to exist
   auto num_loaded = publicKeys_.loadAllReplicasKeyStoresFromReservedPages();
   uint32_t liveQuorumSize = ReplicaConfig::instance().waitForFullCommOnStartup ? clusterSize_ : quorumSize_;
-  if (ReplicaConfig::instance().getkeyExchangeOnStart()) ConcordAssert(num_loaded >= liveQuorumSize);
+  if (ReplicaConfig::instance().getkeyExchangeOnStart()) {
+    ConcordAssertGE(num_loaded, liveQuorumSize);
+  }
   LOG_INFO(KEY_EX_LOG, "building crypto system after state transfer");
   notifyRegistry();
+}
+
+void KeyExchangeManager::loadClientPublicKeys() {
+  // after State Transfer public keys for all clients are expected to exist
+  clientsPublicKeys_.checkAndSetState();
 }
 
 void KeyExchangeManager::exchangeTlsKeys(const std::string& type, const SeqNum& bft_sn) {
   auto keys = concord::util::crypto::Crypto::instance().generateECDSAKeyPair(
       concord::util::crypto::KeyFormat::PemFormat, concord::util::crypto::CurveType::secp384r1);
-  std::string root_path =
-      bftEngine::ReplicaConfig::instance().certificatesRootPath + "/" + std::to_string(repID_) + "/" + type;
+  bool use_unified_certs = bftEngine::ReplicaConfig::instance().useUnifiedCertificates;
+  const std::string base_path =
+      bftEngine::ReplicaConfig::instance().certificatesRootPath + "/" + std::to_string(repID_);
+  std::string root_path = (use_unified_certs) ? base_path : base_path + "/" + type;
 
-  std::string cert_path = root_path + "/" + type + ".cert";
+  std::string cert_path = (use_unified_certs) ? root_path + "/node.cert" : root_path + "/" + type + ".cert";
   std::string prev_key_pem = concord::util::crypto::Crypto::instance()
                                  .RsaHexToPem(std::make_pair(SigManager::instance()->getSelfPrivKey(), ""))
                                  .first;
@@ -261,7 +266,7 @@ void KeyExchangeManager::sendKeyExchange(const SeqNum& sn) {
 
 // sends the clients public keys via the internal client, if keys weren't published or outdated.
 void KeyExchangeManager::sendInitialClientsKeys(const std::string& keys) {
-  if (clientsPublicKeys_.published_) {
+  if (clientsPublicKeys_.published()) {
     LOG_INFO(KEY_EX_LOG, "Clients public keys were already published");
     return;
   }
@@ -277,6 +282,7 @@ void KeyExchangeManager::sendInitialClientsKeys(const std::string& keys) {
 }
 
 void KeyExchangeManager::onPublishClientsKeys(const std::string& keys, std::optional<std::string> bootstrap_keys) {
+  LOG_INFO(KEY_EX_LOG, "");
   auto save = true;
   if (bootstrap_keys) {
     if (keys != *bootstrap_keys) {
