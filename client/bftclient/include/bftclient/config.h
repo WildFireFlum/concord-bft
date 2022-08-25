@@ -71,11 +71,14 @@ struct ClientConfig {
   std::optional<std::string> replicas_master_key_folder_path = "./replicas_rsa_keys";
 };
 
+
+
 // Generic per-request configuration shared by reads and writes.
 struct RequestConfig {
   bool pre_execute = false;
   uint64_t sequence_number = 0;
-  uint32_t max_reply_size = 64 * 1024;
+  // Clientservice's max reply size in bytes
+  uint32_t max_reply_size = 1024 * 1024;
   std::chrono::milliseconds timeout = 5s;
   std::string correlation_id = "";
   std::string span_context = "";
