@@ -4,13 +4,17 @@ from datetime import datetime
 import os
 import sys
 import traceback
+from pathlib import Path
 
 from eliot import register_exception_extractor
 register_exception_extractor(Exception, lambda e: {"traceback": traceback.format_exc()})
 
 @lru_cache(maxsize=None)
 def logdir_timestamp():
-    return datetime.now().strftime("%y-%m-%d_%H:%M:%S")
+    if 'APOLLO_RUN_TEST_DIR' not in os.environ:
+        print("APOLLO_RUN_TEST_DIR environment variable not set")
+        return datetime.now().strftime("%y-%m-%d_%H-%M-%S")
+    return os.environ['APOLLO_RUN_TEST_DIR']
 
 
 def set_file_destination():
@@ -20,24 +24,27 @@ def set_file_destination():
         now = logdir_timestamp()
         test_name = f"apollo_run_{now}"
 
-    logs_dir = '../../build/tests/apollo/logs/'
-    test_dir = f'{logs_dir}{test_name}'
+    relative_apollo_logs = 'tests/apollo/logs'
+    relative_current_run_logs = f'{relative_apollo_logs}/{logdir_timestamp()}'
+    logs_dir = f'../../build/{relative_current_run_logs}'
+    test_dir = f'{logs_dir}/{test_name}'
     test_log = f'{test_dir}/{test_name}.log'
 
-    if not os.path.isdir(logs_dir):
-        # Create logs directory if not exist
-        os.mkdir(logs_dir)
+    logs_shortcut = Path('../../build/apollogs')
+    logs_shortcut.mkdir(exist_ok=True)
+    all_logs = logs_shortcut / 'all'
+    if not all_logs.exists():
+        all_logs.symlink_to(target=Path(f'../{relative_apollo_logs}'), target_is_directory=True)
 
-    if not os.path.isdir(test_dir):
-        # Create directory for the test logs
-        os.mkdir(test_dir)
+    Path(test_dir).mkdir(parents=True, exist_ok=True)
+    latest_shortcut = Path(logs_shortcut) / 'latest'
 
-    if os.path.isfile(test_log):
-        # Clean logs if file already exist
-        open(test_log, "w").close()
+    if latest_shortcut.exists():
+        latest_shortcut.unlink()
+    latest_shortcut.symlink_to(target=Path(f'../{relative_current_run_logs}'), target_is_directory=True)
 
     # Set the log file path
-    to_file(open(test_log, "a"))
+    to_file(open(test_log, "a+"))
 
 
 # Set logs to the console
@@ -45,13 +52,16 @@ def stdout(message):
     if message.get("action_status", "") == "succeeded":
         return
 
+    additional_fields = [(key, val) for key, val in message.items() if key not in
+                       ("action_type", "action_status", "result", "task_uuid",
+                        "timestamp", "task_level", "message_type")]
+
     fields = [datetime.fromtimestamp(message["timestamp"]).strftime("%d/%m/%Y %H:%M:%S.%f"),
      message.get("message_type", None),
      message.get("action_type", None),
      message.get("action_status", None),
      message.get("result", None),
-     str([(key, val) for key, val in message.items() if key not in
-          ("action_type", "action_status", "result", "task_uuid", "timestamp", "task_level", "message_type")]),
+     str(additional_fields).replace('\\n', '\n'),
      message["task_uuid"],
      ]
 

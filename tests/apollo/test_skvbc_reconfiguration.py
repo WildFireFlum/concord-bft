@@ -139,7 +139,7 @@ class SkvbcReconfigurationTest(ApolloTest):
     @with_bft_network(start_replica_cmd, selected_configs=lambda n, f, c: n == 7, with_cre=True, publish_master_keys=True)
     async def test_clients_add_remove_cmd(self, bft_network):
         """
-            sends a clientsAddRemoveCommand and test the the status for the CRE client is correct
+            sends a clientsAddRemoveCommand and test the status for the CRE client is correct
         """
         bft_network.start_all_replicas()
         bft_network.start_cre()
@@ -345,11 +345,12 @@ class SkvbcReconfigurationTest(ApolloTest):
             
 
     async def run_client_ke_command(self, bft_network, tls, prev_data="", prev_ts=0):
-        client = bft_network.random_client()
-        op = operator.Operator(bft_network.config, client, bft_network.builddir)
-        rep = await op.client_key_exchange_command([bft_network.cre_id], tls=tls)
-        rep = cmf_msgs.ReconfigurationResponse.deserialize(rep)[0]
-        assert rep.success is True
+        with log.start_action(action_type="run_client_ke_command", tls=tls, client_id=bft_network.cre_id):
+            client = bft_network.random_client()
+            op = operator.Operator(bft_network.config, client, bft_network.builddir)
+            rep = await op.client_key_exchange_command([bft_network.cre_id], tls=tls)
+            rep = cmf_msgs.ReconfigurationResponse.deserialize(rep)[0]
+            assert rep.success is True
 
     def collect_client_certificates(self, bft_network, targets):
         certs = {}
@@ -544,7 +545,7 @@ class SkvbcReconfigurationTest(ApolloTest):
         for i in range(301): # Produce 301 new blocks
             await skvbc.send_write_kv_set()
         # Now, lets switch keys to all replicas
-        exchanged_replicas = bft_network.all_replicas()
+        exchanged_replicas = bft_network.all_replicas(without={1,2,3,4,5,6})
         await self.run_replica_tls_key_exchange_cycle(bft_network, exchanged_replicas, affected_replicas=[r for r in range(bft_network.config.n + 1)])
         bft_network.copy_certs_from_server_to_clients(7)
         bft_network.restart_clients(False, False)
@@ -700,7 +701,7 @@ class SkvbcReconfigurationTest(ApolloTest):
             - Restore backed up file
             - Start replica 1
               (Replica's 1 published public key now doesn't match its private key. If there's no assertion, replica 1
-              will send invalid sugnatires and will be malicious)
+              will send invalid signatures and will be malicious)
             - Reach checkpoint 6 and validate all replicas except replica 1 are back on track.
         """
 
@@ -1316,6 +1317,8 @@ class SkvbcReconfigurationTest(ApolloTest):
 
         await op.prune(latest_pruneable_blocks)
 
+        expected_last_pruned_block = min([replica_response.block_id for replica_response in latest_pruneable_blocks])
+
         # Verify the system is able to get new write requests (which means that pruning has done)
         with trio.fail_after(30):
             await skvbc.send_write_kv_set()
@@ -1326,7 +1329,9 @@ class SkvbcReconfigurationTest(ApolloTest):
         for r in rsi_rep.values():
             status = cmf_msgs.ReconfigurationResponse.deserialize(r)[0]
             assert status.response.in_progress is False
-            assert status.response.last_pruned_block == 150
+            assert status.response.last_pruned_block == expected_last_pruned_block, \
+                f"status.response.last_pruned_block: {status.response.last_pruned_block} != " \
+                f"expected_last_pruned_block: {expected_last_pruned_block}"
 
 
     @with_trio

@@ -40,6 +40,7 @@ def start_replica_cmd(builddir, replica_id):
             "-v", viewChangeTimeoutMilli,
             "-e", str(True),
             "-f", '1'
+            "-l", "/concord-bft/tests/simpleKVBC/scripts/logging.properties"
             ]
 
 def start_replica_cmd_without_key_exchange(builddir, replica_id):
@@ -689,7 +690,7 @@ class SkvbcViewChangeTest(ApolloTest):
     @verify_linearizability()
     async def test_view_changes_at_startup(self, bft_network, tracker):
         """
-        This test aims to validate intial automatic view changes
+        This test aims to validate initial automatic view changes
         with n-f startup. 
         1) Start a BFT network excluding replicas with id 0 and 1
         2) Sleep for sometime, so that replica timeout on connecting to current primary
@@ -800,6 +801,7 @@ class SkvbcViewChangeTest(ApolloTest):
         crash_candidates = bft_network.all_replicas(
             without=except_replicas.union({primary}))
         random.shuffle(crash_candidates)
+        log.log_message(message_type="Crashing replicas", replicas=[primary] + crash_candidates[1:nb_crashing - 1])
         for i in range(nb_crashing - 1):
             bft_network.stop_replica(crash_candidates[i])
             crashed_replicas.add(crash_candidates[i])

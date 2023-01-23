@@ -112,7 +112,8 @@ class SkvbcPreExecutionTest(ApolloTest):
         for i in range(NUM_OF_SEQ_WRITES):
             client = bft_network.random_client()
             skvbc = kvbc.SimpleKVBCProtocol(bft_network, tracker)
-            await skvbc.send_write_kv_set(client, max_set_size=2)
+            await skvbc.send_write_kv_set(client, max_set_size=2,
+                                          description=f'Client request {i}/{NUM_OF_SEQ_WRITES - 1} to preprocess')
         await bft_network.assert_successful_pre_executions_count(0, NUM_OF_SEQ_WRITES)
 
     @with_trio

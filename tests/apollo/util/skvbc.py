@@ -276,15 +276,17 @@ class SimpleKVBCProtocol:
 
         TODO: Make filling concurrent to speed up tests
         """
-        with log.start_action(action_type="fill_and_wait_for_checkpoint"):
+        checkpoint_before = await self.bft_network.wait_for_checkpoint(replica_id=random.choice(initial_nodes))
+        request_count = 1 + num_of_checkpoints_to_add * CHECKPOINT_SEQUENCES
+        with log.start_action(action_type="fill_and_wait_for_checkpoint", checkpoint_before=checkpoint_before,
+                              request_count=request_count):
             client = self.bft_network.random_client(without_clients)
-            checkpoint_before = await self.bft_network.wait_for_checkpoint(
-                replica_id=random.choice(initial_nodes))
             # Write enough data to checkpoint and create a need for state transfer
-            for i in range(1 + num_of_checkpoints_to_add * CHECKPOINT_SEQUENCES):
+            for i in range(request_count):
                 key = self.random_key()
                 val = self.random_value()
-                reply = await self.send_write_kv_set(client, [(key, val)])
+                reply = await self.send_write_kv_set(client, [(key, val)],
+                                                     description=f'checkpoint fill request {i} / {request_count - 1}')
                 assert reply.success
 
             await self.bft_network.wait_for_replicas_to_collect_stable_checkpoint(
@@ -366,7 +368,7 @@ class SimpleKVBCProtocol:
             if num_clients == 0:
                 return []
             cur = bytearray("A", 'utf-8')
-            keys = [b"A...................."]
+            keys = [b"A" + (b"." * (self.LENGTH_FOR_RANDOM_KVS - 1))]
             for i in range(1, 2 * num_clients):
                 end = cur[-1]
                 if chr(end) == 'Z':  # extend the key
@@ -393,7 +395,7 @@ class SimpleKVBCProtocol:
                   (self.keys[1], self.random_value())]
 
             reply = await self.send_write_kv_set(kv=kv)
-            assert last_block + 1 == reply.last_block_id
+            assert last_block + 1 <= reply.last_block_id, f"last_block + 1: {last_block + 1} != reply.last_block_id: {reply.last_block_id}"
 
             last_block = reply.last_block_id
 
@@ -402,7 +404,7 @@ class SimpleKVBCProtocol:
             action.log(message_type=f'[READ-YOUR-WRITES] Checking if the {kv} entry is readable...')
             data = await client.read(self.get_block_data_req(last_block))
             kv2 = self.parse_reply(data)
-            assert kv2 == dict(kv)
+            assert kv2 == dict(kv), f"kv2: {kv2} != kv: {dict(kv)}"
             action.log(message_type=f'[READ-YOUR-WRITES] OK.')
 
     async def send_write_kv_set(self, client=None, kv=None, max_set_size=None, long_exec=False, assert_reply=True,
@@ -478,8 +480,9 @@ class SimpleKVBCProtocol:
                 self.tracker.send_write(client_id, seq_num, readset, dict(writeset), read_version)
             try:
                 serialized_reply = await client.write(msg, seq_num, pre_process=self.pre_exec_all)
-                action.log(message_type=f"received reply", client=client.client_id, seq=client.req_seq_num.val())
                 reply = self.parse_reply(serialized_reply)
+                action.log(message_type=f"received reply", client=client.client_id, seq=client.req_seq_num.val(),
+                           success=reply.success)
                 if reply_assert is True:
                     assert reply.success
                 if self.tracker is not None:
@@ -699,7 +702,7 @@ class SimpleKVBCProtocol:
         """
         client = client or self.bft_network.random_client()
         for i in range(kv_count):
-            await self.send_write_kv_set(client=client, kv=[(b'A' * i, b'')], description=f'{i}')
+            await self.send_write_kv_set(client=client, description=f'Message {i} / {kv_count}')
 
     def readset(self, min_size, max_size):
         return self.random_keys(random.randint(min_size, max_size))

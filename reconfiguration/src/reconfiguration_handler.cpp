@@ -37,7 +37,7 @@ bool ReconfigurationHandler::handle(const WedgeCommand& cmd,
                                     uint32_t,
                                     const std::optional<bftEngine::Timestamp>&,
                                     concord::messages::ReconfigurationResponse&) {
-  LOG_INFO(getLogger(), "Wedge command instructs replica to stop at sequence number " << bft_seq_num);
+  LOG_INFO(getLogger(), "Wedge command instructs replica to stop at next checkpoint after sequence number " << bft_seq_num);
   bftEngine::ControlStateManager::instance().setStopAtNextCheckpoint(bft_seq_num);
   if (cmd.noop == false) addCreateDbSnapshotCbOnWedge(true);
 
@@ -334,8 +334,10 @@ BftReconfigurationHandler::BftReconfigurationHandler() {
     key_str.append(buf, 0, key_content.gcount());
   }
   key_str.append(buf, 0, key_content.gcount());
+  auto signingAlgorithm = bftEngine::ReplicaConfig::instance().operatorMsgSigningAlgo;
   verifier_ =
-      Factory::getVerifier(key_str, bftEngine::ReplicaConfig::instance().operatorMsgSigningAlgo, KeyFormat::PemFormat);
+      Factory::getVerifier(key_str, signingAlgorithm, KeyFormat::PemFormat);
+  LOG_INFO(GL, "Initialized BftReconfigurationHandler with operator details: " << KVLOG(verifier_->getPubKey(), signingAlgorithm));
 }
 
 bool BftReconfigurationHandler::verifySignature(uint32_t sender_id,

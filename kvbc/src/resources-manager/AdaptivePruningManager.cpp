@@ -67,20 +67,22 @@ void AdaptivePruningManager::notifyReplicas(const PruneInfo &pruneInfo) {
   rreq.command = pruneRequest;
   rreq.sender = bftEngine::ReplicaConfig::instance().replicaId;
 
-  std::vector<uint8_t> serialized_req;
+  std::vector<concord::Byte> serialized_req;
 
   concord::messages::serialize(serialized_req, rreq);
 
   uint64_t flags = bft::client::Flags::RECONFIG_FLAG;
   const std::string cid = "adaptive-pruning-manager-cid";
 
-  std::string sig(SigManager::instance()->getMySigLength(), '\0');
-  SigManager::instance()->sign(reinterpret_cast<char *>(serialized_req.data()), serialized_req.size(), sig.data());
-  rreq.signature = std::vector<uint8_t>(sig.begin(), sig.end());
+  rreq.signature = std::vector<uint8_t>(SigManager::instance()->getMySigLength());
+  SigManager::instance()->sign(SigManager::instance()->getReplicaLastExecutedSeq(),
+                               serialized_req.data(),
+                               serialized_req.size(),
+                               rreq.signature.data());
+
   serialized_req.clear();
   concord::messages::serialize(serialized_req, rreq);
-  std::string serializedString(serialized_req.begin(), serialized_req.end());
-  bftClient->sendRequest(flags, serializedString.length(), serializedString.c_str(), cid);
+  bftClient->sendRequest(flags, serialized_req.size(), reinterpret_cast<char *>(serialized_req.data()), cid);
 }
 
 const concord::messages::PruneSwitchModeRequest &AdaptivePruningManager::getLatestConfiguration() {

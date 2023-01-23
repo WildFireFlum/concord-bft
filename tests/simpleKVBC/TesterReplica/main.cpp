@@ -183,20 +183,29 @@ void run_replica(int argc, char** argv) {
 
 using namespace std;
 
+static std::unordered_map<int, __sighandler_t> defaultHandlers;
+
 namespace {
 static void signal_handler(int signal_num) {
-  LOG_INFO(GL, "Program received signal " << signal_num);
+  LOG_WARN(GL, "Program received signal " << signal_num);
+  printCallStack();
   concord::kvbc::test::timeToExit = true;
+  defaultHandlers[signal_num](signal_num);
 }
 }  // namespace
+
 int main(int argc, char** argv) {
-  signal(SIGINT, signal_handler);
-  signal(SIGTERM, signal_handler);
+  const auto signals = {SIGABRT, SIGILL, SIGFPE, SIGSEGV, SIGTERM, SIGKILL, SIGQUIT, SIGHUP, SIGBUS, SIGSYS, SIGPIPE, SIGSTOP, SIGTSTP, SIGXFSZ};
+
+  for (int signalCode : signals) {
+    defaultHandlers[signalCode] = signal(signalCode, signal_handler);
+  }
 
   try {
     concord::kvbc::test::run_replica(argc, argv);
   } catch (const std::exception& e) {
     LOG_FATAL(GL, "exception: " << e.what());
+    return 1;
   }
   return 0;
 }

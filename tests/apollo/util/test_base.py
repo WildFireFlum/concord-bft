@@ -20,6 +20,27 @@ import itertools
 
 
 class ApolloTest(unittest.TestCase):
+    FAILED_CASES = []
+
+    @classmethod
+    def tearDownClass(cls):
+        if ApolloTest.FAILED_CASES:
+            print('Failed test cases:\n' + '\n'.join(ApolloTest.FAILED_CASES))
+
+    def tearDown(self):
+        if hasattr(self._outcome, 'errors'):
+            result = self.defaultTestResult()
+            self._feedErrorsToResult(result, self._outcome.errors)
+        else:
+            result = self._outcome.result
+
+        for typ, errors in (('ERROR', result.errors), ('FAIL', result.failures)):
+            for test, text in errors:
+                if test is self:
+                    #  the full traceback is in the variable `text`
+                    msg = [x for x in text.split('\n')[1:]
+                           if not x.startswith(' ')][0]
+                    self.FAILED_CASES.append(f"{self.id()}: {msg}")
 
     @property
     def test_seed(self):
@@ -28,7 +49,6 @@ class ApolloTest(unittest.TestCase):
     def setUp(self):
         self._test_seed = os.getenv('APOLLO_SEED', random.randint(0, 1 << 32))
         random.seed(self._test_seed)
-        print(f'Test seed set to {self._test_seed}')
 
 
 def parameterize(**parameterize_kwargs):
@@ -52,7 +72,7 @@ def parameterize(**parameterize_kwargs):
 
     return decorator
 
-def repeat_test(max_repeats: int, break_on_first_failure: bool, break_on_first_success: bool):
+def repeat_test(max_repeats: int, break_on_first_failure: bool, break_on_first_success: bool, test_name=None):
     """
     Runs a test  max_repeats times when both break_on_first_failure and break_on_first_success et to False.
     Only one of break_on_first_failure or break_on_first_success can be True (both can be False).
@@ -75,8 +95,8 @@ def repeat_test(max_repeats: int, break_on_first_failure: bool, break_on_first_s
                         break
                 except Exception as e:
                     is_last = (i == max_repeats) or break_on_first_failure
-                    log.log_message(message_type='Test attempt failed', run=i, max_repeats=max_repeats,
-                                    is_last=is_last,
+                    log.log_message(message_type='ERROR - Test attempt failed', run=i, max_repeats=max_repeats,
+                                    is_last=is_last, test_name=test_name
                                     )
                     if is_last:
                         raise e

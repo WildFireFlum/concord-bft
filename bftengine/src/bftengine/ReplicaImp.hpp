@@ -93,7 +93,7 @@ class ReplicaImp : public InternalReplicaApi, public ReplicaForStateTransfer {
   ControllerBase* controller = nullptr;
 
   // digital signatures
-  std::unique_ptr<SigManager> sigManager_;
+  std::shared_ptr<SigManager> sigManager_;
 
   // view change logic
   ViewsManager* viewsManager = nullptr;
@@ -367,7 +367,12 @@ class ReplicaImp : public InternalReplicaApi, public ReplicaForStateTransfer {
 
   void recoverRequests();
 
-  bool validateMessage(MessageBase* msg);
+  //bool validateMessageGeneric(MessageBase *msg, std::function<void()> validateFunc);
+  template <typename MessageType>
+  bool validateMessage(MessageType *msg);
+
+  //bool validateMessage(CheckpointMsg *msg);
+  //bool validateMessage(MessageBase* msg);
   std::function<bool(MessageBase*)> getMessageValidator();
 
   // InternalReplicaApi
@@ -433,7 +438,7 @@ class ReplicaImp : public InternalReplicaApi, public ReplicaForStateTransfer {
              const ReplicaConfig&,
              shared_ptr<IRequestsHandler>,
              IStateTransfer*,
-             SigManager*,
+             std::shared_ptr<SigManager>,
              ReplicasInfo*,
              ViewsManager*,
              shared_ptr<MsgsCommunicator>,
@@ -618,6 +623,8 @@ class ReplicaImp : public InternalReplicaApi, public ReplicaForStateTransfer {
   void onCarrierMessage(CarrierMesssage* msg);
 
  private:
+  void primaryPushNoOpIfWedgePending(SeqNum seq);
+  void setLastExecutedSeqNum(SeqNum seq);
   void addTimers();
   void startConsensusProcess(PrePrepareMsg* pp, bool isCreatedEarlier);
   void startConsensusProcess(PrePrepareMsg* pp);

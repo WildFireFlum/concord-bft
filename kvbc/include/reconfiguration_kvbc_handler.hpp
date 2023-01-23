@@ -70,7 +70,7 @@ class StateSnapshotReconfigurationHandler : public ReconfigurationBlockTools,
               concord::messages::ReconfigurationResponse&) override;
 
   bool handle(const concord::messages::SignedPublicStateHashRequest&,
-              uint64_t,
+              uint64_t bft_seq_num,
               uint32_t,
               const std::optional<bftEngine::Timestamp>&,
               concord::messages::ReconfigurationResponse&) override;
@@ -246,7 +246,7 @@ class ReconfigurationHandler : public concord::reconfiguration::BftReconfigurati
               concord::messages::ReconfigurationResponse&) override;
 
   bool handle(const concord::messages::UnwedgeCommand&,
-              uint64_t,
+              uint64_t bft_seq_num,
               uint32_t,
               const std::optional<bftEngine::Timestamp>&,
               concord::messages::ReconfigurationResponse&) override;
@@ -352,7 +352,8 @@ class InternalPostKvReconfigurationHandler : public concord::reconfiguration::IR
   InternalPostKvReconfigurationHandler(kvbc::IBlockAdder& block_adder, kvbc::IReader& ro_storage)
       : ReconfigurationBlockTools{block_adder, ro_storage} {}
   bool verifySignature(uint32_t sender_id, const std::string& data, const std::string& signature) const override {
-    return true;
+    if (!bftEngine::impl::SigManager::instance()->hasVerifier(sender_id)) return false;
+    return bftEngine::impl::SigManager::instance()->verifySig(sender_id, data, signature);
   }
 
   bool handle(const concord::messages::ClientExchangePublicKey& command,

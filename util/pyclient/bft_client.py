@@ -35,6 +35,26 @@ from abc import ABC, abstractmethod
 # 'replicaMsgSigningAlgo' value also.
 replica_msg_signing_algo = "eddsa" # or "rsa"
 
+
+class FastWriteCounter(object):
+    def __init__(self, val=0):
+        self._number_of_read = 0
+        import itertools
+        self._counter = itertools.count(start=val)
+        import threading
+        self._read_lock = threading.Lock()
+
+    def inc(self):
+        next(self._counter)
+
+    def val(self):
+        with self._read_lock:
+            value = next(self._counter) - self._number_of_read
+            self._number_of_read += 1
+        return value
+
+__COUNT = FastWriteCounter(val=int(1e6))
+
 class ReqSeqNum:
     def __init__(self):
         self.time_since_epoch_milli = int(time.time() * 1000)
@@ -47,6 +67,9 @@ class ReqSeqNum:
         Calculate the next req_seq_num.
         Return the calculated value as an int sized for 64 bits
         """
+
+        globals()['__COUNT'].inc()
+        return self.val()
         milli = int(time.time() * 1000)
         if milli > self.time_since_epoch_milli:
             self.time_since_epoch_milli = milli
@@ -60,6 +83,7 @@ class ReqSeqNum:
         return self.val()
 
     def val(self):
+        return globals()['__COUNT'].val()
         """ Return an int sized for 64 bits """
         assert (self.count <= self.max_count)
         r = self.time_since_epoch_milli << self.max_count_len
@@ -85,6 +109,9 @@ class MofNQuorum:
     @classmethod
     def All(cls, config, replicas):
         return MofNQuorum(replicas, len(replicas))
+
+    def __str__(self):
+        return f"n: {self.replicas}, m: {self.required}"
 
 class BftClient(ABC):
     def __init__(self, config, replicas, ro_replicas=[]):
@@ -229,7 +256,7 @@ class BftClient(ABC):
         if not self.comm_prepared:
             await self._comm_prepare()
 
-        cid = str(self.req_seq_num.next())
+        batch_cid = str(self.req_seq_num.next())
         batch_size = len(msg_batch)
 
         if batch_seq_nums is None:
@@ -256,10 +283,10 @@ class BftClient(ABC):
                     msg, signature, client_id = self._corrupt_signing_params(msg, signature, client_id, corrupt_params)
 
             msg_data = b''.join([msg_data, bft_msgs.pack_request(
-                self.client_id, msg_seq_num, False, self.config.req_timeout_milli, msg_cid, msg, 0, True,
+                self.client_id, msg_seq_num, False, self.config.req_timeout_milli, batch_cid, msg, 0, True,
                 reconfiguration=False, span_context=b'', signature=signature, batch_index=n)])
 
-        data = bft_msgs.pack_batch_request(self.client_id, batch_size, msg_data, cid)
+        data = bft_msgs.pack_batch_request(self.client_id, batch_size, msg_data, batch_cid)
 
         if m_of_n_quorum is None:
             m_of_n_quorum = MofNQuorum.LinearizableQuorum(self.config, [r.id for r in self.replicas])
@@ -271,7 +298,7 @@ class BftClient(ABC):
                 return await self._send_receive_loop(data, False, m_of_n_quorum,
                     batch_size * self.config.retry_timeout_milli / 1000, no_retries=no_retries)
         except trio.TooSlowError:
-            raise trio.TooSlowError(f"client_id {self.client_id}, for batch msg {cid} {batch_seq_nums}")
+            raise trio.TooSlowError(f"client_id {self.client_id}, for batch msg {batch_cid} {batch_seq_nums}")
         finally:
             pass
 
