@@ -26,6 +26,6 @@ namespace utt::client {
 /// @param coins The available coins to pick from
 /// @param amount The target amount
 /// @return Up to two coins that satisfy the amount (preferring exact matches) or need to be merged
-std::vector<size_t> PickCoinsPreferExactMatch(const std::vector<libutt::api::Coin>& coins, uint64_t targetAmount);
+std::vector<std::size_t> PickCoinsPreferExactMatch(const std::vector<libutt::api::Coin>& coins, uint64_t targetAmount);
 
 }  // namespace utt::client
