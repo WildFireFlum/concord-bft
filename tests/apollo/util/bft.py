@@ -29,7 +29,7 @@ import inspect
 import time
 from pathlib import Path
 from re import sub
-from typing import Coroutine, Sequence, Callable
+from typing import Coroutine, Sequence, Callable, Optional
 import re
 import trio
 
@@ -415,7 +415,7 @@ class BftTestNetwork:
                     now = datetime.now().strftime("%y-%m-%d_%H:%M:%S")
                     test_name = f"{now}_{self.current_test}"
 
-                self.test_dir = f"{self.builddir}/tests/apollo/logs/{test_name}/{self.current_test}/"
+                self.test_dir = f"{self.builddir}/tests/apollo/logs/{logdir_timestamp()}/{test_name}/{self.current_test}/"
                 test_log = f"{self.test_dir}stdout_cre.log"
 
                 os.makedirs(self.test_dir, exist_ok=True)
@@ -461,10 +461,10 @@ class BftTestNetwork:
                 fd.close()
             p.wait()
 
-    def transfer_db_files(self, source, dests):
-        with log.start_action(action_type="transfer db files"):
-            source_db_dir = os.path.join(self.testdir, DB_FILE_PREFIX + str(source))
-            for r in dests:
+    def transfer_db_files(self, source_id: int, dest_ids: Sequence[int]):
+        with log.start_action(action_type="transfer db files", source_id=source_id, dests=dest_ids):
+            source_db_dir = os.path.join(self.testdir, DB_FILE_PREFIX + str(source_id))
+            for r in dest_ids:
                 dest_db_dir = os.path.join(self.testdir, DB_FILE_PREFIX + str(r))
                 res = subprocess.run(['cp', '-rf', source_db_dir, dest_db_dir])
                 log.log_message(message_type=f"copy db files from {source_db_dir} to {dest_db_dir}, result is {res.returncode}")
@@ -485,27 +485,29 @@ class BftTestNetwork:
 
     @log_call
     def restart_clients(self, generate_tx_signing_keys=True, restart_replicas=True):
-        # remove all existing clients
-        for client in self.clients.values():
-            client.__exit__()
-        for client in self.reserved_clients.values():
-            client.__exit__()
-        self.reserved_client_ids_in_use = []
-        self.metrics.__exit__()
-        self.clients = {}
+        with log.start_action(action_type="restart_clients", generate_tx_signing_keys=generate_tx_signing_keys,
+                              restart_replicas=restart_replicas):
+            # remove all existing clients
+            for client in self.clients.values():
+                client.__exit__()
+            for client in self.reserved_clients.values():
+                client.__exit__()
+            self.reserved_client_ids_in_use = []
+            self.metrics.__exit__()
+            self.clients = {}
 
-        if generate_tx_signing_keys:
-            # remove existing transaction signing keys and generate again
-            shutil.rmtree(self.txn_signing_keys_base_path, ignore_errors=True)
-            self.setup_txn_signing()
-            if restart_replicas:
-                # Now, we must restart the replicas
-                self.stop_all_replicas()
-                self.start_all_replicas()
+            if generate_tx_signing_keys:
+                # remove existing transaction signing keys and generate again
+                shutil.rmtree(self.txn_signing_keys_base_path, ignore_errors=True)
+                self.setup_txn_signing()
+                if restart_replicas:
+                    # Now, we must restart the replicas
+                    self.stop_all_replicas()
+                    self.start_all_replicas()
 
-        self._init_metrics()
-        self._create_clients()
-        self._create_reserved_clients()
+            self._init_metrics()
+            self._create_clients()
+            self._create_reserved_clients()
 
     def _generate_crypto_keys(self):
         keygen = os.path.join(self.toolsdir, "GenerateConcordKeys")
@@ -783,7 +785,6 @@ class BftTestNetwork:
 
     @staticmethod
     def monitor_replica_subproc(subproc: subprocess.Popen, replica_id: int, stop_event: Event, stdout_file):
-        log_message(message_type="Monitoring subproc", replica_id=replica_id, pid=subproc.pid)
         while True:
             return_code = subproc.poll()
 
@@ -803,6 +804,9 @@ class BftTestNetwork:
                 break
 
             sleep(0.2)
+
+    def get_replicas(self, replica_ids):
+        return [replica for replica in self.replicas if replica.id in replica_ids]
 
     def start_replica(self, replica_id):
         """
@@ -857,7 +861,8 @@ class BftTestNetwork:
         digest = self.binary_digest(replica_binary_path) if Path(replica_binary_path).exists() else 'Unknown'
 
         with log.start_action(action_type="start_replica_process", replica=replica_id, is_external=is_external,
-                              binary_path=replica_binary_path, binary_digest=digest, cmd=' '.join(start_cmd)):
+                              binary_path=replica_binary_path, binary_digest=digest, cmd=' '.join(start_cmd),
+                              with_monitor=keep_logs):
             my_env = os.environ.copy()
             my_env["RID"] = str(replica_id)
             if is_external:
@@ -1135,6 +1140,31 @@ class BftTestNetwork:
                     else:
                         return value
 
+    async def wait_for_view_with_threshold(self, view_number: int, threshold: Optional[int] = None,
+                                           timeout_seconds: float = 45, sleep_seconds: float = .25, error_msg=None):
+        """
+        Waits for at least threshold replicas to reach view view_number
+        :param view_number: The view number to reach
+        :param threshold: The minimal amount of replicas which are expected to reach view view_number,
+                          Defaults to 2f + 2c + 1
+        :param timeout_seconds: Maximal amount of seconds to wait
+        :param sleep_seconds: Time to sleep between samples, in seconds
+        :param error_msg: Error to display in case of timeout
+        :return: The number of replicas who reached view view_number at the time of the last sample
+        """
+        threshold = threshold if threshold else 2 * self.config.f + 2 * self.config.c + 1
+        replica_in_view_count = 0
+        try:
+            with trio.fail_after(timeout_seconds):
+                while replica_in_view_count < threshold:
+                    replica_in_view_count = await self.count_replicas_in_view(view_number)
+                    await trio.sleep(sleep_seconds)
+        except trio.TooSlowError as e:
+            msg = error_msg if error_msg else \
+                f"Only {replica_in_view_count} out of {threshold} replicas reached view number {view_number}"
+            raise trio.TooSlowError(msg) from e
+        return replica_in_view_count
+
     async def wait_for_view(self, replica_id, expected=None,
                             err_msg="Expected view not reached"):
         """
@@ -1156,7 +1186,9 @@ class BftTestNetwork:
                 matching_view = await self._wait_for_matching_agreed_view(replica_id, expected)
                 action.log(message_type=f'Matching view #{matching_view} has been agreed among replicas.')
 
-                nb_replicas_in_matching_view = await self._wait_for_active_view(matching_view)
+                nb_replicas_in_matching_view = \
+                    await self.wait_for_view_with_threshold(view_number=matching_view,
+                                                            threshold=2 * self.config.f + 2 * self.config.c + 1)
                 action.log(f'View #{matching_view} is active on '
                       f'{nb_replicas_in_matching_view} replicas '
                       f'({nb_replicas_in_matching_view} >= n-f = {self.config.n - self.config.f}).')
@@ -1185,29 +1217,14 @@ class BftTestNetwork:
             action.add_success_fields(last_agreed_view=last_agreed_view)
             return last_agreed_view
 
-    async def _wait_for_active_view(self, view):
-        """
-        Wait for a view to become active on enough (n-f) replicas
-        """
-        with log.start_action(action_type="_wait_for_active_view", view=view):
-            with trio.fail_after(seconds=45):
-                while True:
-                    nb_replicas_in_view = await self._count_replicas_in_view(view)
-
-                    # wait for n-f = 2f+2c+1 replicas to be in the expected view
-                    if nb_replicas_in_view >= 2 * self.config.f + 2 * self.config.c + 1:
-                        break
-                    await trio.sleep(0.1)
-            return nb_replicas_in_view
-
-    async def _count_replicas_in_view(self, view):
+    async def count_replicas_in_view(self, view):
         """
         Count the number of replicas that have activated a given view
         """
-        with log.start_action(action_type="_count_replicas_in_view", view=view):
+        with log.start_action(action_type="count_replicas_in_view", view=view):
             nb_replicas_in_view = 0
 
-            async def count_if_replica_in_view(r, expected_view):
+            async def _count_if_replica_in_view(r, expected_view):
                 """
                 A closure that allows concurrent counting of replicas
                 that have activated a given view.
@@ -1234,7 +1251,7 @@ class BftTestNetwork:
         async with trio.open_nursery() as nursery:
             for r in self.get_live_replicas():
                 nursery.start_soon(
-                    count_if_replica_in_view, r, view)
+                    _count_if_replica_in_view, r, view)
         return nb_replicas_in_view
 
     async def force_quorum_including_replica(self, replica_id):
@@ -1278,15 +1295,16 @@ class BftTestNetwork:
             source_replica_id = await self.metrics.get(replica_id, *key)
             return source_replica_id
 
-    async def wait_for_state_transfer_to_start(self):
+    async def wait_for_state_transfer_to_start(self, replica_ids: Optional[Sequence[int]]=None):
         """
         Retry checking every .5 seconds until state transfer starts at least one
         node. Stop trying, and fail the test after 30 seconds.
         """
-        with log.start_action(action_type="wait_for_state_transfer_to_start"):
+        replicas = self.replicas if not replica_ids else filter(lambda rep: rep.id in replica_ids, self.replicas)
+        with log.start_action(action_type="wait_for_state_transfer_to_start", replica_ids=[rep.id for rep in replicas]):
             with trio.fail_after(30): # seconds
                 async with trio.open_nursery() as nursery:
-                    for replica in self.replicas:
+                    for replica in replicas:
                         nursery.start_soon(self._wait_to_receive_st_msgs,
                                            replica,
                                            nursery.cancel_scope)
@@ -1325,7 +1343,7 @@ class BftTestNetwork:
                         pass # metrics not yet available, continue looping
                     await trio.sleep(0.1)
 
-    async def wait_for_state_transfer_to_stop(self, up_to_date_node, stale_node, stop_on_stable_seq_num=False, seconds_until_timeout=45 if os.getenv('BUILD_COMM_TCP_TLS') == "OFF" else 30):
+    async def wait_for_state_transfer_to_stop(self, up_to_date_node: int, stale_node: int, stop_on_stable_seq_num=False, seconds_until_timeout=45 if os.getenv('BUILD_COMM_TCP_TLS') == "OFF" else 30):
         with log.start_action(action_type="wait_for_state_transfer_to_stop", up_to_date_node=up_to_date_node, stale_node=stale_node, stop_on_stable_seq_num=stop_on_stable_seq_num, seconds_until_timeout=seconds_until_timeout):
             with trio.fail_after(seconds_until_timeout):
                 # Get the lastExecutedSeqNumber from a started node
@@ -1353,7 +1371,9 @@ class BftTestNetwork:
                                     on_transferring_complete = self.metrics.get_local(metrics,
                                         'bc_state_transfer', 'Counters', 'on_transferring_complete')
                                     action.log(message_type="Not complete yet",
-                                        seq_num=n, last_stored_checkpoint=last_stored_checkpoint, on_transferring_complete=on_transferring_complete)
+                                               seq_num=n, expected_seq_num=expected_seq_num,
+                                               last_stored_checkpoint=last_stored_checkpoint,
+                                               on_transferring_complete=on_transferring_complete)
 
                                 # Exit condition
                                 if n >= expected_seq_num:

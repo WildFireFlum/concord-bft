@@ -88,12 +88,17 @@ class SkvbcBackupRestoreTest(ApolloTest):
         )
 
         # stop n replicas in a random order with a delay of 5s in between
+        #bft_network.stop_all_replicas()
+        #stopped_replicas = bft_network.all_replicas()
         stopped_replicas = await self._stop_random_replicas_with_delay(bft_network, delay=5)
 
         # start stopped replicas in a random order with a delay of 5s in between
         await self._start_random_replicas_with_delay(bft_network, stopped_replicas, current_primary, delay=5)
+        #bft_network.start_all_replicas()
 
         # verify checkpoint persistence
+        log.log_message(message_type=f"Wait for replicas to reach checkpoint", checkpoint=checkpoint_before+1,
+                        replicas=list(stopped_replicas))
         await bft_network.wait_for_replicas_to_checkpoint(
             stopped_replicas,
             expected_checkpoint_num=lambda ecn: ecn == checkpoint_before + 1)
@@ -365,7 +370,7 @@ class SkvbcBackupRestoreTest(ApolloTest):
         """
         with trio.fail_after(seconds=fail_after_time):
             while True:
-                nb_replicas_in_view = await bft_network._count_replicas_in_view(view)
+                nb_replicas_in_view = await bft_network.count_replicas_in_view(view)
 
                 # wait for n-f = 2f+2c+1 replicas to be in the expected view
                 if nb_replicas_in_view >= 2 * bft_network.config.f + 2 * bft_network.config.c + 1:

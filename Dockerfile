@@ -7,7 +7,25 @@
 #   For example wget and pip-tools.
 
 
-FROM concordbft/concord-bft:0.48
+FROM ubuntu:18.04
+LABEL Description="Build environment for concord-bft"
 
-RUN apt-get update
-RUN apt-get install linux-tools-common linux-tools-generic linux-tools-`uname -r` -y
+ENV HOME /root
+COPY ./install_deps.sh /install_deps.sh
+
+SHELL ["/bin/bash", "-c"]
+
+RUN echo $'path-exclude /usr/share/doc/* \n\
+path-exclude /usr/share/doc/*/copyright \n\
+path-exclude /usr/share/man/* \n\
+path-exclude /usr/share/groff/* \n\
+path-exclude /usr/share/info/* \n\
+path-exclude /usr/share/lintian/* \n\
+path-exclude /usr/share/linda/*' > /etc/dpkg/dpkg.cfg.d/01_nodoc && \
+        /bin/bash -c "/install_deps.sh" && \
+        apt-get clean && \
+        apt-get autoclean && \
+        rm -rf /var/lib/apt/lists/*
+
+# For eliot-tree's rendering
+ENV LC_ALL=C.UTF-8

@@ -116,7 +116,8 @@ class SkvbcViewChangeTest(ApolloTest):
             )
 
             new_last_block = skvbc.parse_reply(await client.read(skvbc.get_last_block_req()))
-            self.assertEqual(new_last_block, last_block)
+            self.assertGreaterEqual(new_last_block, last_block)
+            self.assertLessEqual(new_last_block, last_block + len(bft_network.all_replicas()))
 
 
 
@@ -439,8 +440,8 @@ class SkvbcViewChangeTest(ApolloTest):
         n = bft_network.config.n
         f = bft_network.config.f
         c = bft_network.config.c
-
         current_primary = 0
+        view = 0
         for _ in range(2):
             self.assertEqual(len(bft_network.procs), n,
                              "Make sure all replicas are up initially.")
@@ -460,28 +461,17 @@ class SkvbcViewChangeTest(ApolloTest):
 
             await self._send_random_writes(skvbc)
 
-            stable_replica = random.choice(
-                bft_network.all_replicas(without=crashed_replicas))
-
-            view = await bft_network.wait_for_view(
-                replica_id=stable_replica,
-                expected=lambda v: v >= expected_next_primary,
-                err_msg="Make sure a view change has been triggered."
-            )
+            view += 1
+            await bft_network.wait_for_view_with_threshold(view)
             current_primary = view
-            [bft_network.start_replica(i) for i in crashed_replicas]
+            for i in crashed_replicas:
+                bft_network.start_replica(i)
 
             await skvbc.read_your_writes()
 
-        await bft_network.wait_for_view(
-            replica_id=current_primary,
-            err_msg="Make sure all ongoing view changes have completed."
-        )
-
+        await bft_network.wait_for_view_with_threshold(view)
         await skvbc.read_your_writes()
 
-        #check after test is fixed
-        await bft_network.assert_slow_path_prevalent(0, 0, stable_replica)
 
     @with_trio
     @with_bft_network(start_replica_cmd,

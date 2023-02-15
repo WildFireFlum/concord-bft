@@ -15,17 +15,26 @@ import random
 import traceback
 import unittest
 import util.eliot_logging as log
+from util.eliot_logging import logdir
 from functools import wraps
 import itertools
+import atexit
+from pathlib import Path
+
+
+def write_failures_file():
+    if ApolloTest.FAILED_CASES:
+        Path(logdir()).absolute().mkdir(parents=True, exist_ok=True)
+        with open(os.path.abspath(f'{logdir()}/failed_cases.txt'), 'a+') as failed_cases_file:
+            for test_name, msg in ApolloTest.FAILED_CASES.items():
+                print(f'{test_name} - {msg}', file=failed_cases_file)
+
+
+atexit.register(write_failures_file)
 
 
 class ApolloTest(unittest.TestCase):
-    FAILED_CASES = []
-
-    @classmethod
-    def tearDownClass(cls):
-        if ApolloTest.FAILED_CASES:
-            print('Failed test cases:\n' + '\n'.join(ApolloTest.FAILED_CASES))
+    FAILED_CASES = dict()
 
     def tearDown(self):
         if hasattr(self._outcome, 'errors'):
@@ -34,13 +43,13 @@ class ApolloTest(unittest.TestCase):
         else:
             result = self._outcome.result
 
-        for typ, errors in (('ERROR', result.errors), ('FAIL', result.failures)):
+        for errors in (result.errors, result.failures):
             for test, text in errors:
-                if test is self:
+                if test.id() not in ApolloTest.FAILED_CASES:
                     #  the full traceback is in the variable `text`
                     msg = [x for x in text.split('\n')[1:]
                            if not x.startswith(' ')][0]
-                    self.FAILED_CASES.append(f"{self.id()}: {msg}")
+                    ApolloTest.FAILED_CASES[test.id()] = msg
 
     @property
     def test_seed(self):

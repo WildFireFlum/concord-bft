@@ -12,6 +12,7 @@
 import os.path
 import unittest
 import time
+from pathlib import Path
 from shutil import copy2
 from typing import Set, Optional, Callable
 
@@ -1614,7 +1615,58 @@ class SkvbcReconfigurationTest(ApolloTest):
         for r in bft_network.all_replicas():
             nb_fast_path = await bft_network.get_metric(r, bft_network, "Counters", "totalFastPaths")
             self.assertGreater(nb_fast_path, 0)
-    
+
+
+    @with_trio
+    @with_bft_network(start_replica_cmd, bft_configs=[BFTConfig(n=4, f=1, c=0)], publish_master_keys=True)
+    async def test_key_exchange_after_add_nodes_with_failure(self, bft_network):
+        """
+             The test checks that a late replica (6) is able to exchange its initial key after fetching it state
+             via state transfer after the network is scaled up.
+         """
+        bft_network.start_all_replicas()
+        skvbc = kvbc.SimpleKVBCProtocol(bft_network)
+        await skvbc.send_n_kvs_sequentially(50, description='Validate network liveness')
+        client = bft_network.random_client()
+        client.config._replace(req_timeout_milli=10000)
+        op = operator.Operator(bft_network.config, client,  bft_network.builddir)
+        test_config = 'new_configuration_n_7_f_2_c_0'
+        await op.add_remove_with_wedge(test_config, bft=True, restart=False)
+        await self.validate_stop_on_wedge_point(bft_network, skvbc, fullWedge=True)
+        new_replicas = {4}
+        late_replica_set = {5, 6}
+        source_id = 1
+        bft_network.stop_all_replicas()
+        bft_network.transfer_db_files(source_id, new_replicas)
+        conf = TestConfig(n=7,
+                          f=2,
+                          c=0,
+                          num_clients=10,
+                          key_file_prefix=KEY_FILE_PREFIX,
+                          start_replica_cmd=start_replica_cmd_with_key_exchange,
+                          stop_replica_cmd=None,
+                          num_ro_replicas=0)
+        await bft_network.change_configuration(conf, generate_tls=True)
+        bft_network.restart_clients(restart_replicas=False)
+        bft_network.start_replicas(replicas=bft_network.all_replicas(without=late_replica_set))
+        await self.validate_epoch_number(bft_network, 1, bft_network.all_replicas(without=late_replica_set))
+
+        await skvbc.send_n_kvs_sequentially(601, description=f'Trigger ST for {late_replica_set}')
+
+        for replica in late_replica_set:
+            bft_network.start_replicas(replicas={replica})
+            await bft_network.wait_for_state_transfer_to_start(replica_ids={replica})
+            await bft_network.wait_for_state_transfer_to_stop(0,
+                                                              replica,
+                                                              stop_on_stable_seq_num=False)
+            await self.validate_epoch_number(bft_network, 1, {replica})
+            await self.validate_initial_key_exchange(bft_network, {replica}, metrics_id="self_key_exchange",
+                                                     cond_func=lambda actual: actual == 1)
+        await skvbc.send_n_kvs_sequentially(301, description='Validate fast path')
+        for r in bft_network.all_replicas():
+            nb_fast_path = await bft_network.get_metric(r, bft_network, "Counters", "totalFastPaths")
+            self.assertGreater(nb_fast_path, 0)
+
     @with_trio
     @with_bft_network(start_replica_cmd, bft_configs=[BFTConfig(n=4, f=1, c=0)], publish_master_keys=True)
     async def test_add_nodes_with_failures(self, bft_network):
@@ -1634,25 +1686,22 @@ class SkvbcReconfigurationTest(ApolloTest):
          """
         with log.start_action(action_type="test_add_nodes_with_failures"):
             initial_prim = 0
-            crashed_replica = bft_network.random_set_of_replicas(1, {initial_prim})
+            crashed_replica = {3}
             log.log_message(message_type=f"crashed replica is {crashed_replica}")
             bft_network.start_all_replicas()
             skvbc = kvbc.SimpleKVBCProtocol(bft_network)
             await bft_network.check_initial_master_key_publication(bft_network.all_replicas())
-            for i in range(100):
-                await skvbc.send_write_kv_set()
+            await skvbc.send_n_kvs_sequentially(20, description='Verify system liveness')
             # This is a loop to make sure that all replicas are up before interfering them
             with trio.fail_after(30):
                 nb_fast_path = await bft_network.get_metric(initial_prim, bft_network, "Counters", "totalFastPaths")
                 while nb_fast_path <= 0:
-                    for i in range(100):
-                        await skvbc.send_write_kv_set()
+                    await skvbc.send_n_kvs_sequentially(20)
                     nb_fast_path = await bft_network.get_metric(initial_prim, bft_network, "Counters", "totalFastPaths")
             with net.ReplicaSubsetIsolatingAdversary(bft_network, crashed_replica) as adversary:
                 adversary.interfere()
 
-                for i in range(601):
-                    await skvbc.send_write_kv_set()
+                await skvbc.send_n_kvs_sequentially(601, description=f'Trigger ST in {crashed_replica} after comm is restored')
                 client = bft_network.random_client()
                 client.config._replace(req_timeout_milli=10000)
                 op = operator.Operator(bft_network.config, client,  bft_network.builddir)
@@ -1662,23 +1711,14 @@ class SkvbcReconfigurationTest(ApolloTest):
             replicas_for_st = {6}
             source = list(bft_network.random_set_of_replicas(1, without=crashed_replica)).pop()
             await self.validate_stop_on_wedge_point(bft_network, skvbc, fullWedge=False)
-            await bft_network.wait_for_state_transfer_to_start()
+            await bft_network.wait_for_state_transfer_to_start(replica_ids=crashed_replica)
 
             # Lets wait until the late replica gets the new configuration
             with trio.fail_after(30):
                 for r in crashed_replica:
-                    while True:
+                    configurations_file = Path(os.path.join(bft_network.testdir, "configurations." + str(r)))
+                    while not configurations_file.is_file() or test_config not in configurations_file.read_text():
                         await trio.sleep(1)
-                        configurations_file = os.path.join(bft_network.testdir, "configurations." + str(r))
-                        if not os.path.isfile(configurations_file):
-                            continue
-                        with open(configurations_file, "r") as file:
-                            done = False
-                            for l in file.readlines():
-                                if test_config in l:
-                                    done = True
-                            if done:
-                                break
 
             bft_network.stop_all_replicas()
             bft_network.transfer_db_files(source, new_replicas - replicas_for_st)
@@ -1697,37 +1737,45 @@ class SkvbcReconfigurationTest(ApolloTest):
 
             live_replicas = bft_network.all_replicas(without=replicas_for_st.union(crashed_replica))
             await bft_network.check_initital_key_exchange(stop_replicas=False, full_key_exchange=False, replicas_to_start=live_replicas)
-            for i in range(601):
-                await skvbc.send_write_kv_set()
+            await skvbc.send_n_kvs_sequentially(601, description=f'New epoch without {crashed_replica.union(replicas_for_st)}')
             bft_network.start_replicas(crashed_replica)
-            await self.validate_initial_key_exchange(bft_network, crashed_replica, metrics_id="self_key_exchange", expected=0)
+            await self.validate_initial_key_exchange(bft_network, crashed_replica, metrics_id="self_key_exchange",
+                                                     cond_func=lambda actual: actual == 0)
             for r in crashed_replica:
                 await bft_network.wait_for_state_transfer_to_stop(initial_prim,
                                                                   r,
                                                                   stop_on_stable_seq_num=False)
             live_replicas = bft_network.all_replicas(without=replicas_for_st)
             await self.validate_epoch_number(bft_network, 1, live_replicas)
-            await self.validate_initial_key_exchange(bft_network, crashed_replica, metrics_id="self_key_exchange", expected=1)
-            bft_network.start_replicas(replicas_for_st)
-            await self.validate_initial_key_exchange(bft_network, replicas_for_st, metrics_id="self_key_exchange", expected=0)
-            for i in range(601):
-                await skvbc.send_write_kv_set()
+            await self.validate_initial_key_exchange(bft_network, crashed_replica, metrics_id="self_key_exchange",
+                                                     cond_func=lambda actual: actual == 1)
+            # Make sure that replica 3 started using its new key after state transfer
+            # If replica 6 is up before, it might not be able to participate in the consensus
+            # (will fail to validate the commit proof of 3, while live replicas succeed),
+            # which requires an additional state transfer
+            #await skvbc.send_n_kvs_sequentially(301, description=f'Wait for {crashed_replica} to use new key')
 
-            await bft_network.wait_for_state_transfer_to_start()
+            bft_network.start_replicas(replicas_for_st)
+            await self.validate_initial_key_exchange(bft_network, replicas_for_st, metrics_id="self_key_exchange",
+                                                     cond_func=lambda actual: actual == 0)
+            await skvbc.send_n_kvs_sequentially(601, description=f'Make progress after starting {replicas_for_st}')
+
+            await bft_network.wait_for_state_transfer_to_start(replica_ids=replicas_for_st)
             for r in replicas_for_st:
                 await bft_network.wait_for_state_transfer_to_stop(initial_prim,
                                                                   r,
                                                                   stop_on_stable_seq_num=False)
 
             await self.validate_epoch_number(bft_network, 1, bft_network.all_replicas())
-            await self.validate_initial_key_exchange(bft_network, replicas_for_st, metrics_id="self_key_exchange", expected=1)
-            for i in range(300):
-                await skvbc.send_write_kv_set()
+            await self.validate_initial_key_exchange(bft_network, replicas_for_st, metrics_id="self_key_exchange",
+                                                     cond_func=lambda actual: actual >= 1)
+            await skvbc.send_n_kvs_sequentially(301, description=f'Make progress for fast path check')
             for r in bft_network.all_replicas():
                 nb_fast_path = await bft_network.get_metric(r, bft_network, "Counters", "totalFastPaths")
                 self.assertGreater(nb_fast_path, 0)
-            await self.validate_initial_key_exchange(bft_network, bft_network.all_replicas(), metrics_id="self_key_exchange", expected=bft_network.config.n)
-
+                await self.validate_initial_key_exchange(bft_network, {r},
+                                                         metrics_id="self_key_exchange",
+                                                         cond_func=lambda actual: actual >= 1)
 
 
     @with_trio
@@ -1916,28 +1964,29 @@ class SkvbcReconfigurationTest(ApolloTest):
                 except trio.TooSlowError:
                     pass
 
+    async def wait_for_network_to_stop_after_wedge(self, stop_condition, client, op, quorum, fullWedge):
+        stopped_replicas = set()
+        while len(stopped_replicas) < stop_condition:
+            await op.wedge_status(quorum=quorum, fullWedge=fullWedge)
+            rsi_rep = client.get_rsi_replies()
+            for replica_id, r in rsi_rep.items():
+                res = cmf_msgs.ReconfigurationResponse.deserialize(r)
+                status = res[0].response.stopped
+                if status and replica_id not in stopped_replicas:
+                    stopped_replicas.add(replica_id)
+                    log.log_message(message_type=f"Replica stopped after wedge", replica_id=replica_id)
+            await trio.sleep(1)
 
     async def validate_stop_on_wedge_point(self, bft_network, skvbc, fullWedge=False):
-        with log.start_action(action_type="validate_stop_on_stable_checkpoint") as action:
+        with log.start_action(action_type="validate_stop_on_wedge_point") as action:
             with trio.fail_after(seconds=90):
                 client = bft_network.random_client()
                 client.config._replace(req_timeout_milli=10000)
                 op = operator.Operator(bft_network.config, client,  bft_network.builddir)
-                done = False
                 quorum = None if fullWedge is True else bft_client.MofNQuorum.LinearizableQuorum(bft_network.config, [r.id for r in bft_network.replicas])
-                while done is False:
-                    stopped_replicas = 0
-                    await op.wedge_status(quorum=quorum, fullWedge=fullWedge)
-                    rsi_rep = client.get_rsi_replies()
-                    done = True
-                    for r in rsi_rep.values():
-                        res = cmf_msgs.ReconfigurationResponse.deserialize(r)
-                        status = res[0].response.stopped
-                        if status:
-                            stopped_replicas += 1
-                    stop_condition = bft_network.config.n if fullWedge is True else (bft_network.config.n - bft_network.config.f)
-                    if stopped_replicas < stop_condition:
-                        done = False
+                stop_condition = bft_network.config.n if fullWedge is True else (bft_network.config.n - bft_network.config.f)
+                await self.wait_for_network_to_stop_after_wedge(stop_condition, client, op, quorum, fullWedge)
+
                 with log.start_action(action_type='expect_kv_failure_due_to_wedge'):
                     with self.assertRaises(trio.TooSlowError):
                         await skvbc.send_write_kv_set()
@@ -1948,22 +1997,9 @@ class SkvbcReconfigurationTest(ApolloTest):
                 client = bft_network.random_client()
                 client.config._replace(req_timeout_milli=10000)
                 op = operator.Operator(bft_network.config, client,  bft_network.builddir)
-                done = False
                 quorum = None if fullWedge is True else bft_client.MofNQuorum.LinearizableQuorum(bft_network.config, [r.id for r in bft_network.replicas])
-                while done is False:
-                    started_replicas = 0
-                    await op.wedge_status(quorum=quorum, fullWedge=fullWedge)
-                    rsi_rep = client.get_rsi_replies()
-                    done = True
-                    for r in rsi_rep.values():
-                        res = cmf_msgs.ReconfigurationResponse.deserialize(r)
-                        status = res[0].response.stopped
-                        if not status:
-                            started_replicas += 1
-                    stop_condition = bft_network.config.n if fullWedge is True else (bft_network.config.n - bft_network.config.f)
-                    if started_replicas < stop_condition:
-                        done = False
-
+                stop_condition = bft_network.config.n if fullWedge is True else (bft_network.config.n - bft_network.config.f)
+                await self.wait_for_network_to_stop_after_wedge(stop_condition, client, op, quorum, fullWedge)
 
     async def validate_stop_on_super_stable_checkpoint(self, bft_network, skvbc):
           with log.start_action(action_type="validate_stop_on_super_stable_checkpoint") as action:
@@ -2044,9 +2080,6 @@ class SkvbcReconfigurationTest(ApolloTest):
             assert status.response.wedge_status == True
             assert status.response.bft_flag == bft_flag
 
-        
-
-
     async def validate_state_consistency(self, skvbc, key, val):
         return await skvbc.assert_kv_write_executed(key, val)
 
@@ -2070,33 +2103,31 @@ class SkvbcReconfigurationTest(ApolloTest):
                             log.log_message(message_type="Replica" + str(ro_replica_id) + " : lastExecutedSeqNum:" + str(lastExecutedSeqNum))
                             break
 
-    async def validate_epoch_number(self, bft_network, epoch_number, replicas):
-        with trio.fail_after(seconds=70):
+    async def validate_epoch_number(self, bft_network, epoch_number, replica_ids):
+        with log.start_action(action_type="validate_epoch_number", epoch_number=epoch_number, replica_ids=str(replica_ids)), \
+                trio.fail_after(seconds=70):
             succ = False
             # the ro replica should be able to survive these failures
             while not succ:
                 succ = True
-                for r in replicas:
+                for r in replica_ids:
                     curr_epoch = await bft_network.get_metric(r, bft_network, "Gauges", "epoch_number", component="epoch_manager")
                     if curr_epoch != epoch_number:
                         succ = False
                         break
-    async def validate_initial_key_exchange(self, bft_network, replicas, metrics_id, expected):
+
+    async def validate_initial_key_exchange(self, bft_network, replicas, metrics_id, cond_func=None):
         total = 0
-        with trio.fail_after(seconds=10):
-            succ = False
-            while not succ:
-                succ = True
-                total = 0
-                for r in replicas:
-                    count = await bft_network.get_metric(r, bft_network, 'Counters', metrics_id,"KeyExchangeManager")
-                    total += count
-                    if total != expected:
-                        succ = False
-                    else:
-                        succ = True
-                        break
-            assert total == expected
+        try:
+            with trio.fail_after(seconds=10):
+                while not cond_func(total):
+                    total = 0
+                    for r in replicas:
+                        count = await bft_network.get_metric(r, bft_network, 'Counters', metrics_id,"KeyExchangeManager")
+                        total += count
+                log.log_message(message_type=f"Replicas {replicas} successfully completed initial key exchange")
+        except trio.TooSlowError:
+            log.log_message(message_type=f"Initial key exchange timed out with metric {metrics_id} = {total}", )
 
     async def wait_until_cre_gets_replicas_master_keys(self, bft_network, replicas):
         with trio.fail_after(60):

@@ -1,6 +1,6 @@
 CONCORD_BFT_DOCKER_REPO?=concordbft/
 CONCORD_BFT_DOCKER_IMAGE?=concord-bft
-CONCORD_BFT_DOCKER_IMAGE_VERSION?=0.001
+CONCORD_BFT_DOCKER_IMAGE_VERSION?=0.48
 CONCORD_BFT_DOCKER_CONTAINER?=concord-bft
 
 CONCORD_BFT_DOCKERFILE?=Dockerfile
@@ -17,7 +17,7 @@ CONCORD_BFT_THIN_REPLICA_PROTO_PATH?=${CONCORD_BFT_TARGET_SOURCE_PATH}/build/thi
 CONCORD_BFT_KVBC_PROTO_PATH?=${CONCORD_BFT_TARGET_SOURCE_PATH}/build/kvbc/proto
 CONCORD_BFT_UTT_PATH?=${CONCORD_BFT_TARGET_SOURCE_PATH}/build/utt
 CONCORD_BFT_CONTAINER_SHELL?=/bin/bash
-CONCORD_BFT_CONTAINER_CC?=clangt
+CONCORD_BFT_CONTAINER_CC?=clang
 CONCORD_BFT_CONTAINER_CXX?=clang++
 CONCORD_BFT_CMAKE_BUILD_TYPE?=Release
 CONCORD_BFT_CMAKE_BUILD_TESTING?=TRUE
@@ -136,7 +136,11 @@ ifneq (${SKIP_FORMAT},)
 	CONCORD_BFT_FORMAT_CMD=
 endif
 
-APOLLO_TIMESTAMP := $(shell date +%y-%m-%d_%H-%M-%S)
+ROOT_DIR := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
+BUILD_DIR := ${ROOT_DIR}/build
+__TIMESTAMP := $(shell date +%y-%m-%d_%H-%M-%S)
+$(shell mkdir -p ${BUILD_DIR})
+$(shell echo ${__TIMESTAMP} > ${BUILD_DIR}/timestamp)
 
 BASIC_RUN_PARAMS?=-it --init --rm --privileged=true \
 					  --memory-swap -1 \
@@ -144,8 +148,6 @@ BASIC_RUN_PARAMS?=-it --init --rm --privileged=true \
 					  --name="${CONCORD_BFT_DOCKER_CONTAINER}" \
 					  --workdir=${CONCORD_BFT_TARGET_SOURCE_PATH} \
 					  --mount type=bind,source=${CURDIR},target=${CONCORD_BFT_TARGET_SOURCE_PATH}${CONCORD_BFT_CONTAINER_MOUNT_CONSISTENCY} \
-					  --mount type=bind,source=/,target=/host \
-					  --env APOLLO_RUN_TEST_DIR=${APOLLO_TIMESTAMP} \
 					  ${CONCORD_BFT_ADDITIONAL_RUN_PARAMS} \
 					  ${CONCORD_BFT_DOCKER_REPO}${CONCORD_BFT_DOCKER_IMAGE}:${CONCORD_BFT_DOCKER_IMAGE_VERSION}
 

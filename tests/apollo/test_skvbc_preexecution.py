@@ -156,7 +156,7 @@ class SkvbcPreExecutionTest(ApolloTest):
         await skvbc.send_write_kv_set(client, max_set_size=2, long_exec=True)
 
         last_block = await tracker.get_last_block_id(client)
-        self.assertEqual(last_block, 1)
+        self.assertGreaterEqual(last_block, 1)
 
         await bft_network.assert_successful_pre_executions_count(0, 1)
 

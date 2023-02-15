@@ -11,10 +11,21 @@ register_exception_extractor(Exception, lambda e: {"traceback": traceback.format
 
 @lru_cache(maxsize=None)
 def logdir_timestamp():
-    if 'APOLLO_RUN_TEST_DIR' not in os.environ:
-        print("APOLLO_RUN_TEST_DIR environment variable not set")
+    timestamp_file = Path(f'../../build/timestamp')
+    if not timestamp_file.exists():
+        raise
+        print(f"Timestamp file {timestamp_file} doesn't exist")
         return datetime.now().strftime("%y-%m-%d_%H-%M-%S")
-    return os.environ['APOLLO_RUN_TEST_DIR']
+    test_dir_name = timestamp_file.read_text().split('\n')[0]
+    assert len(test_dir_name) > 0
+    return test_dir_name
+
+
+@lru_cache(maxsize=None)
+def logdir():
+    relative_apollo_logs = 'tests/apollo/logs'
+    relative_current_run_logs = f'{relative_apollo_logs}/{logdir_timestamp()}'
+    return f'../../build/{relative_current_run_logs}'
 
 
 def set_file_destination():

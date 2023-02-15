@@ -28,6 +28,9 @@
 
 using concordMetrics::AtomicCounterHandle;
 
+class EdDSAMultisigSigner;
+class EdDSAMultisigVerifier;
+
 namespace bftEngine {
 namespace impl {
 
@@ -100,8 +103,8 @@ class SigManager {
   SigManager& operator=(SigManager&&) = delete;
 
   concord::crypto::SignatureAlgorithm getMainKeyAlgorithm() const;
-  std::shared_ptr<concord::crypto::ISigner> getCurrentReplicaSigner() const;
-  std::shared_ptr<concord::crypto::ISigner> getLastReplicaSigner() const;
+  std::shared_ptr<EdDSAMultisigSigner> getCurrentReplicaSigner() const;
+  std::shared_ptr<EdDSAMultisigSigner> getLastReplicaSigner() const;
   const concord::crypto::IVerifier& getVerifier(PrincipalId otherPrincipal) const;
 
   std::string getClientsPublicKeys();

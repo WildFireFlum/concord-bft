@@ -15,13 +15,16 @@
 #include <memory>
 #include "threshsign/IThresholdSigner.h"
 #include "threshsign/IThresholdVerifier.h"
+#include "threshsign/eddsa/EdDSAMultisigVerifier.h"
+#include "threshsign/eddsa/EdDSAMultisigSigner.h"
 #include "IKeyExchanger.hpp"
 #include "Logger.hpp"
 #include "crypto/crypto.hpp"
 
 namespace bftEngine {
 
-typedef std::int64_t SeqNum;                    // TODO [TK] redefinition
+using CheckpointNum = std::uint64_t;
+using SeqNum = std::int64_t;                    // TODO [TK] redefinition
 constexpr uint16_t checkpointWindowSize = 150;  // TODO [TK] redefinition
 
 class CryptoManager : public IKeyExchanger, public IMultiSigKeyGenerator {
@@ -64,19 +67,31 @@ class CryptoManager : public IKeyExchanger, public IMultiSigKeyGenerator {
                            const std::uint16_t& signerIndex,
                            const SeqNum& sn) override;
 
+  /**
+   * Iterates saved cryptosystems and updates their private key if their public key matches verificationKey
+   * After ST, if a replica has not executed its key exchange but the network did, the internal private key state needs
+   * to be synchronized.
+   * @param secretKey
+   * @param verificationKey
+   * @note: Assumes all keys are formatted as hex strings
+   * @note: TODO: Current implementation is not crash consistent, a ST which was completed after the replica process
+   *        will lose the new private key
+   */
+  void syncPrivateKeyAfterST(const std::string& secretKey, const std::string& verificationKey);
+
   void onCheckpoint(uint64_t newCheckpoint);
 
   // Important note:
   // CryptoManager's cryptosystems are currently implemented using a naive eddsa multisig scheme
   // The following methods break the abstraction of the threshsign library in order
-  // to extract ISigner and IVerifier object.
+  // to extract ISigner and IVerifier objects.
   // This abstraction is broken to allow using the consensus key as the replica's main key (In SigManager), thus
   // enabling an operator to change it (key rotation).
-  // This code will need to be refactored if a different cryptosystem is used.
-  std::shared_ptr<IThresholdSigner> getSigner(SeqNum seq) const;
-  std::shared_ptr<IThresholdVerifier> getMultisigVerifier(SeqNum seq) const;
-  std::array<std::pair<SeqNum, std::shared_ptr<IThresholdVerifier>>, 2> getLatestVerifiers() const;
-  std::array<std::shared_ptr<IThresholdSigner>, 2> getLatestSigners() const;
+  // This code will need to be refactored if a different implementation is used.
+  std::shared_ptr<EdDSAMultisigSigner> getSigner(SeqNum seq) const;
+  std::shared_ptr<EdDSAMultisigVerifier> getMultisigVerifier(SeqNum seq) const;
+  std::array<std::pair<SeqNum, std::shared_ptr<EdDSAMultisigVerifier>>, 2> getLatestVerifiers() const;
+  std::array<std::shared_ptr<EdDSAMultisigSigner>, 2> getLatestSigners() const;
 
  private:
   /**
@@ -99,12 +114,14 @@ class CryptoManager : public IKeyExchanger, public IMultiSigKeyGenerator {
 
     void init();
   };
-  using SeqToSystemMap = std::map<std::uint64_t, std::shared_ptr<CryptoSystemWrapper>>;
+  using CheckpointToSystemMap = std::map<CheckpointNum, std::shared_ptr<CryptoSystemWrapper>>;
 
   // accessing existing Cryptosystems
+  CheckpointNum getCheckpointOfCryptosystemForSeq(const SeqNum sn) const;
   std::shared_ptr<CryptoSystemWrapper> get(const SeqNum& sn) const;
 
   // create CryptoSys for sn if still doesn't exist
+  // Ensures that there are no more than two cryptosystems
   std::shared_ptr<CryptoSystemWrapper> create(const SeqNum& sn);
 
   CryptoManager(std::unique_ptr<Cryptosystem>&& cryptoSys);
@@ -115,14 +132,14 @@ class CryptoManager : public IKeyExchanger, public IMultiSigKeyGenerator {
   CryptoManager& operator=(const CryptoManager&&) = delete;
 
   void assertMapSizeValid() const;
-  const SeqToSystemMap& getSeqToSystem() const;
+  const CheckpointToSystemMap& checkpointToSystem() const;
 
   // chckp -> CryptoSys
   // TODO: this can be converted to a concurrent queue instead of using a mutex
-  SeqToSystemMap cryptoSystems_;
-  // Old cryptosystems can be removed on a checkpoint, which might invalidate
+  CheckpointToSystemMap cryptoSystems_;
+  // Old cryptosystems can be removed on a checkpoint/cryptosystem creation which might invalidate
   // existing cryptoSystems_ iterators. We thus protect cryptoSystems_ access with a mutex
-  // and rely on shared_ptr to keep old cryptosystems alive in concurrent threads when they lag
+  // and rely on shared_ptr to keep old cryptosystems alive in concurrent threads
   mutable std::mutex mutex_;
 };
 }  // namespace bftEngine

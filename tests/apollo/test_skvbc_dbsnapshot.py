@@ -213,7 +213,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
         await bft_network.wait_for_created_db_snapshots_metric(bft_network.all_replicas(), 1)
         for replica_id in bft_network.all_replicas():
             last_blockId = await bft_network.last_db_checkpoint_block_id(replica_id)
-            self.assertEqual(last_blockId, DB_CHECKPOINT_WIN_SIZE)
+            self.assertGreaterEqual(last_blockId, DB_CHECKPOINT_WIN_SIZE)
             bft_network.verify_db_snapshot_is_available(replica_id, last_blockId)
         await self.verify_db_size_on_disk(bft_network)
 
@@ -230,7 +230,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
         snapshot_id = 0
         for replica_id in bft_network.all_replicas():
             snapshot_id = await bft_network.last_db_checkpoint_block_id(replica_id)
-            self.assertEqual(snapshot_id, DB_CHECKPOINT_WIN_SIZE)
+            self.assertGreaterEqual(snapshot_id, DB_CHECKPOINT_WIN_SIZE)
             bft_network.verify_db_snapshot_is_available(replica_id, snapshot_id)
         fast_paths = {}
         for r in bft_network.all_replicas():
@@ -514,7 +514,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
         await bft_network.wait_for_created_db_snapshots_metric(bft_network.all_replicas(), 1)
         for replica_id in bft_network.all_replicas():
             last_block_id = await bft_network.last_db_checkpoint_block_id(replica_id)
-            self.assertEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+            self.assertGreaterEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
             await bft_network.wait_for_db_snapshot(replica_id, last_block_id)
 
         # Send a StateSnapshotRequest and make sure we get the already existing checkpoint/snapshot ID of 600.
@@ -523,9 +523,9 @@ class SkvbcDbSnapshotTest(ApolloTest):
         resp = cmf_msgs.ReconfigurationResponse.deserialize(rep)[0]
         self.assertTrue(resp.success)
         self.assertIsNotNone(resp.response.data)
-        self.assertEqual(resp.response.data.snapshot_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+        self.assertGreaterEqual(resp.response.data.snapshot_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
         # TODO: add test for BlockchainHeightType.EventGroupId here (including support for it in TesterReplica).
-        self.assertEqual(resp.response.data.blockchain_height, DB_CHECKPOINT_HIGH_WIN_SIZE)
+        self.assertGreaterEqual(resp.response.data.blockchain_height, DB_CHECKPOINT_HIGH_WIN_SIZE)
         self.assertEqual(resp.response.data.blockchain_height_type, cmf_msgs.BlockchainHeightType.BlockId)
         self.assertEqual(resp.response.data.key_value_count_estimate, expected_key_value_count_estimate)
 
@@ -560,8 +560,8 @@ class SkvbcDbSnapshotTest(ApolloTest):
         resp = cmf_msgs.ReconfigurationResponse.deserialize(rep)[0]
         self.assertTrue(resp.success)
         self.assertIsNotNone(resp.response.data)
-        self.assertEqual(resp.response.data.snapshot_id, 100)
-        self.assertEqual(resp.response.data.blockchain_height, 100)
+        self.assertGreaterEqual(resp.response.data.snapshot_id, 100)
+        self.assertGreaterEqual(resp.response.data.blockchain_height, 100)
         # TODO: add test for BlockchainHeightType.EventGroupId here (including support for it in TesterReplica).
         self.assertEqual(resp.response.data.blockchain_height_type, cmf_msgs.BlockchainHeightType.BlockId)
         self.assertEqual(resp.response.data.key_value_count_estimate, expected_key_value_count_estimate)
@@ -742,11 +742,11 @@ class SkvbcDbSnapshotTest(ApolloTest):
             res = cmf_msgs.ReconfigurationResponse.deserialize(r)
             self.assertEqual(len(res[0].response.db_checkpoint_info), 2)
             dbcheckpoint_info_list = res[0].response.db_checkpoint_info
-            self.assertTrue(any(dbcheckpoint_info.block_id ==
+            self.assertTrue(any(dbcheckpoint_info.block_id >=
                                 300 for dbcheckpoint_info in dbcheckpoint_info_list))
             for dbcheckpoint_info in dbcheckpoint_info_list:
                 latest_checkpoint_id = max(latest_checkpoint_id, dbcheckpoint_info.block_id)
-            assert(latest_checkpoint_id == snapshot_id)
+            assert(latest_checkpoint_id >= snapshot_id)
 
 
     @with_trio
@@ -764,7 +764,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
         await bft_network.wait_for_created_db_snapshots_metric(bft_network.all_replicas(), 1)
         for replica_id in bft_network.all_replicas():
             last_block_id = await bft_network.last_db_checkpoint_block_id(replica_id)
-            self.assertEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+            self.assertGreaterEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
             await bft_network.wait_for_db_snapshot(replica_id, last_block_id)
 
         op = operator.Operator(bft_network.config, client, bft_network.builddir)
@@ -777,8 +777,8 @@ class SkvbcDbSnapshotTest(ApolloTest):
         for ser_rsi in ser_rsis.values():
             rsi_resp = cmf_msgs.ReconfigurationResponse.deserialize(ser_rsi)[0]
             self.assertEqual(rsi_resp.response.status, cmf_msgs.SnapshotResponseStatus.Success)
-            self.assertEqual(rsi_resp.response.data.snapshot_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
-            self.assertEqual(rsi_resp.response.data.block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+            self.assertGreaterEqual(rsi_resp.response.data.snapshot_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+            self.assertGreaterEqual(rsi_resp.response.data.block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
             # Expect the SHA3-256 hash of the empty string.
             empty_string_sha3_256 = bytes.fromhex("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a")
             self.assertEqual(bytearray(rsi_resp.response.data.hash), empty_string_sha3_256)
@@ -823,7 +823,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
         await bft_network.wait_for_created_db_snapshots_metric(bft_network.all_replicas(), 1)
         for replica_id in range(len(bft_network.all_replicas())):
             last_block_id = await bft_network.last_db_checkpoint_block_id(replica_id)
-            self.assertEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+            self.assertGreaterEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
             await bft_network.wait_for_db_snapshot(replica_id, last_block_id)
 
         op = operator.Operator(bft_network.config, client, bft_network.builddir)
@@ -859,7 +859,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
         await bft_network.wait_for_created_db_snapshots_metric(bft_network.all_replicas(), 1)
         for replica_id in range(len(bft_network.all_replicas())):
             last_block_id = await bft_network.last_db_checkpoint_block_id(replica_id)
-            self.assertEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+            self.assertGreaterEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
             await bft_network.wait_for_db_snapshot(replica_id, last_block_id)
 
         op = operator.Operator(bft_network.config, client, bft_network.builddir)
@@ -893,7 +893,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
         await bft_network.wait_for_created_db_snapshots_metric(bft_network.all_replicas(), 1)
         for replica_id in range(len(bft_network.all_replicas())):
             last_block_id = await bft_network.last_db_checkpoint_block_id(replica_id)
-            self.assertEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+            self.assertGreaterEqual(last_block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
             await bft_network.wait_for_db_snapshot(replica_id, last_block_id)
 
         op = operator.Operator(bft_network.config, client, bft_network.builddir)

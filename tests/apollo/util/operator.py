@@ -251,8 +251,9 @@ class Operator:
     async def wedge_status(self, quorum=None, fullWedge=True):
         if quorum is None:
             quorum = bft_client.MofNQuorum.All(self.client.config, [r for r in range(self.config.n)])
-        msg = self._construct_reconfiguration_wedge_status(fullWedge)
-        return await self.client.read(msg.serialize(), m_of_n_quorum=quorum, reconfiguration=True)
+        with log.start_action(action_type="wedge_status", quorum=str(quorum), fullWedge=fullWedge):
+            msg = self._construct_reconfiguration_wedge_status(fullWedge)
+            return await self.client.read(msg.serialize(), m_of_n_quorum=quorum, reconfiguration=True)
 
     async def unwedge(self, bft=False, restart=False, quorum=None):
         if bft is True:

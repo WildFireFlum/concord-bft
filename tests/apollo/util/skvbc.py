@@ -481,8 +481,8 @@ class SimpleKVBCProtocol:
             try:
                 serialized_reply = await client.write(msg, seq_num, pre_process=self.pre_exec_all)
                 reply = self.parse_reply(serialized_reply)
-                action.log(message_type=f"received reply", client=client.client_id, seq=client.req_seq_num.val(),
-                           success=reply.success)
+                if not reply.success:
+                    action.log(message_type=f"client request failed", client=client.client_id, seq=seq_num)
                 if reply_assert is True:
                     assert reply.success
                 if self.tracker is not None:
@@ -695,14 +695,14 @@ class SimpleKVBCProtocol:
                     self.tracker.status.record_client_timeout(client_id)
                 return
 
-    async def send_n_kvs_sequentially(self, kv_count: int, client: 'BftClient' = None):
+    async def send_n_kvs_sequentially(self, kv_count: int, client: 'BftClient' = None, description=''):
         """
         Reaches a consensus over kv_count blocks, Waits for execution reply message after each block
         so that multiple client requests are not batched
         """
         client = client or self.bft_network.random_client()
         for i in range(kv_count):
-            await self.send_write_kv_set(client=client, description=f'Message {i} / {kv_count}')
+            await self.send_write_kv_set(client=client, description=f'{description} ({i} / {kv_count})')
 
     def readset(self, min_size, max_size):
         return self.random_keys(random.randint(min_size, max_size))
