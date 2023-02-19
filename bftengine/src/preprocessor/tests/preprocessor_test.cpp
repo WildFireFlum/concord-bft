@@ -31,7 +31,6 @@ using namespace std;
 using namespace bft::communication;
 using namespace bftEngine;
 using namespace preprocessor;
-using concord::crypto::SignatureAlgorithm;
 
 namespace {
 

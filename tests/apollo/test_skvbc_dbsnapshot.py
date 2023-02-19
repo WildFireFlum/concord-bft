@@ -509,8 +509,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
             await skvbc.send_kv_set(client, set(), [(key, value)], 0)
         await bft_network.wait_for_stable_checkpoint(bft_network.all_replicas(), stable_seqnum=DB_CHECKPOINT_HIGH_WIN_SIZE)
 
-        # Expect that a snapshot/checkpoint with an ID of 600 is available. For that, we assume that the snapshot/checkpoint ID
-        # is the last block ID at which the snapshot/checkpoint is created.
+        # Expect that a snapshot/checkpoint with an ID of 600 or greater is available.
         await bft_network.wait_for_created_db_snapshots_metric(bft_network.all_replicas(), 1)
         for replica_id in bft_network.all_replicas():
             last_block_id = await bft_network.last_db_checkpoint_block_id(replica_id)
@@ -523,11 +522,12 @@ class SkvbcDbSnapshotTest(ApolloTest):
         resp = cmf_msgs.ReconfigurationResponse.deserialize(rep)[0]
         self.assertTrue(resp.success)
         self.assertIsNotNone(resp.response.data)
-        self.assertGreaterEqual(resp.response.data.snapshot_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+        self.assertEqual(resp.response.data.snapshot_id, last_block_id)
         # TODO: add test for BlockchainHeightType.EventGroupId here (including support for it in TesterReplica).
-        self.assertGreaterEqual(resp.response.data.blockchain_height, DB_CHECKPOINT_HIGH_WIN_SIZE)
+        self.assertGreaterEqual(resp.response.data.blockchain_height, last_block_id)
         self.assertEqual(resp.response.data.blockchain_height_type, cmf_msgs.BlockchainHeightType.BlockId)
-        self.assertEqual(resp.response.data.key_value_count_estimate, expected_key_value_count_estimate)
+        # First blocks are main key updates
+        self.assertGreaterEqual(resp.response.data.key_value_count_estimate, expected_key_value_count_estimate - bft_network.config.n)
 
     @with_trio
     @with_bft_network(start_replica_cmd_with_operator_and_public_keys, selected_configs=lambda n, f, c: n == 7)
@@ -564,13 +564,13 @@ class SkvbcDbSnapshotTest(ApolloTest):
         self.assertGreaterEqual(resp.response.data.blockchain_height, 100)
         # TODO: add test for BlockchainHeightType.EventGroupId here (including support for it in TesterReplica).
         self.assertEqual(resp.response.data.blockchain_height_type, cmf_msgs.BlockchainHeightType.BlockId)
-        self.assertEqual(resp.response.data.key_value_count_estimate, expected_key_value_count_estimate)
+        # First blocks are main key updates
+        self.assertGreaterEqual(resp.response.data.key_value_count_estimate, expected_key_value_count_estimate - bft_network.config.n)
 
         # Expect that a snapshot/checkpoint with an ID of 100 is available. For that, we assume that the snapshot/checkpoint ID
         # is the last block ID at which the snapshot/checkpoint is created.
-        last_block_id = 100
         for replica_id in bft_network.all_replicas():
-            await bft_network.wait_for_db_snapshot(replica_id, last_block_id)
+            await bft_network.wait_for_db_snapshot(replica_id, resp.response.data.snapshot_id)
 
     @with_trio
     @with_bft_network(start_replica_cmd_with_high_db_window_size, selected_configs=lambda n, f, c: n == 7)
@@ -768,7 +768,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
             await bft_network.wait_for_db_snapshot(replica_id, last_block_id)
 
         op = operator.Operator(bft_network.config, client, bft_network.builddir)
-        ser_resp = await op.signed_public_state_hash_req(DB_CHECKPOINT_HIGH_WIN_SIZE)
+        ser_resp = await op.signed_public_state_hash_req(last_block_id)
         ser_rsis = op.get_rsi_replies()
         resp = cmf_msgs.ReconfigurationResponse.deserialize(ser_resp)[0]
         self.assertTrue(resp.success)
@@ -777,8 +777,8 @@ class SkvbcDbSnapshotTest(ApolloTest):
         for ser_rsi in ser_rsis.values():
             rsi_resp = cmf_msgs.ReconfigurationResponse.deserialize(ser_rsi)[0]
             self.assertEqual(rsi_resp.response.status, cmf_msgs.SnapshotResponseStatus.Success)
-            self.assertGreaterEqual(rsi_resp.response.data.snapshot_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
-            self.assertGreaterEqual(rsi_resp.response.data.block_id, DB_CHECKPOINT_HIGH_WIN_SIZE)
+            self.assertEqual(rsi_resp.response.data.snapshot_id, last_block_id)
+            self.assertEqual(rsi_resp.response.data.block_id, last_block_id)
             # Expect the SHA3-256 hash of the empty string.
             empty_string_sha3_256 = bytes.fromhex("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a")
             self.assertEqual(bytearray(rsi_resp.response.data.hash), empty_string_sha3_256)
@@ -828,7 +828,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
 
         op = operator.Operator(bft_network.config, client, bft_network.builddir)
         # Try to read two of the keys that we wrote. We shouldn't be able to get them, though, because they are not public.
-        ser_resp = await op.state_snapshot_read_as_of_req(DB_CHECKPOINT_HIGH_WIN_SIZE, [kvs[0][0], kvs[1][0]])
+        ser_resp = await op.state_snapshot_read_as_of_req(last_block_id, [kvs[0][0], kvs[1][0]])
         ser_rsis = op.get_rsi_replies()
         resp = cmf_msgs.ReconfigurationResponse.deserialize(ser_resp)[0]
         self.assertTrue(resp.success)
@@ -864,7 +864,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
 
         op = operator.Operator(bft_network.config, client, bft_network.builddir)
         # Read two of the keys that we wrote.
-        ser_resp = await op.state_snapshot_read_as_of_req(DB_CHECKPOINT_HIGH_WIN_SIZE, [kvs[0][0], kvs[1][0]])
+        ser_resp = await op.state_snapshot_read_as_of_req(last_block_id, [kvs[0][0], kvs[1][0]])
         ser_rsis = op.get_rsi_replies()
         resp = cmf_msgs.ReconfigurationResponse.deserialize(ser_resp)[0]
         self.assertTrue(resp.success)
@@ -882,10 +882,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
         bft_network.start_all_replicas()
         client = bft_network.random_client()
         skvbc = kvbc.SimpleKVBCProtocol(bft_network, tracker)
-        for i in range(DB_CHECKPOINT_HIGH_WIN_SIZE):
-            key = skvbc.unique_random_key()
-            value = skvbc.random_value()
-            await skvbc.send_kv_set(client, set(), [(key, value)], 0)
+        await skvbc.send_n_kvs_sequentially(DB_CHECKPOINT_HIGH_WIN_SIZE)
         await bft_network.wait_for_stable_checkpoint(bft_network.all_replicas(), stable_seqnum=DB_CHECKPOINT_HIGH_WIN_SIZE)
 
         # Expect that a snapshot/checkpoint with an ID of 600 is available. For that, we assume that the snapshot/checkpoint ID
@@ -898,7 +895,7 @@ class SkvbcDbSnapshotTest(ApolloTest):
 
         op = operator.Operator(bft_network.config, client, bft_network.builddir)
         # Read two keys that we haven't written.
-        ser_resp = await op.state_snapshot_read_as_of_req(DB_CHECKPOINT_HIGH_WIN_SIZE,
+        ser_resp = await op.state_snapshot_read_as_of_req(last_block_id,
                                                           [skvbc.unique_random_key().decode(),
                                                            skvbc.unique_random_key().decode()])
         ser_rsis = op.get_rsi_replies()

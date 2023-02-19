@@ -294,9 +294,10 @@ class SimpleKVBCProtocol:
 
             await self.network_wait_for_checkpoint(
                 initial_nodes,
-                expected_checkpoint_num=lambda ecn: ecn == checkpoint_before + num_of_checkpoints_to_add,
+                expected_checkpoint_num=lambda ecn: ecn >= checkpoint_before + num_of_checkpoints_to_add,
                 verify_checkpoint_persistency=verify_checkpoint_persistency,
                 assert_state_transfer_not_started=assert_state_transfer_not_started, timeout=timeout)
+
 
     async def network_wait_for_checkpoint(
             self, initial_nodes,

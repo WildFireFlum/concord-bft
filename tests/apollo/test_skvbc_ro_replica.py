@@ -272,11 +272,8 @@ class SkvbcReadOnlyReplicaTest(ApolloTest):
         Start ROR
         Verify ROR fetches state
         """
-        print("hi1")
         bft_network.start_all_replicas()
-        print("hi2")
         skvbc = kvbc.SimpleKVBCProtocol(bft_network)
-        print("hi3")
 
         await skvbc.fill_and_wait_for_checkpoint(
             initial_nodes=bft_network.all_replicas(),

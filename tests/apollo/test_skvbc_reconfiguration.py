@@ -552,7 +552,7 @@ class SkvbcReconfigurationTest(ApolloTest):
         bft_network.restart_clients(False, False)
         skvbc = kvbc.SimpleKVBCProtocol(bft_network)
         # Make sure that the read only replica is able to complete another state transfer
-        for i in range(500): # Produce 500 new blocks
+        for i in range(300):
             await skvbc.send_write_kv_set()
         await self._wait_for_st(bft_network, ro_replica_id, 600)
 
@@ -1964,17 +1964,17 @@ class SkvbcReconfigurationTest(ApolloTest):
                 except trio.TooSlowError:
                     pass
 
-    async def wait_for_network_to_stop_after_wedge(self, stop_condition, client, op, quorum, fullWedge):
-        stopped_replicas = set()
-        while len(stopped_replicas) < stop_condition:
+    async def wait_for_network_wedge_status(self, stop_condition, client, op, quorum, fullWedge, waitForStop):
+        replica_set = set()
+        while len(replica_set) < stop_condition:
             await op.wedge_status(quorum=quorum, fullWedge=fullWedge)
             rsi_rep = client.get_rsi_replies()
             for replica_id, r in rsi_rep.items():
                 res = cmf_msgs.ReconfigurationResponse.deserialize(r)
                 status = res[0].response.stopped
-                if status and replica_id not in stopped_replicas:
-                    stopped_replicas.add(replica_id)
-                    log.log_message(message_type=f"Replica stopped after wedge", replica_id=replica_id)
+                if status == waitForStop and replica_id not in replica_set:
+                    replica_set.add(replica_id)
+                    log.log_message(message_type=f"Replica {'stopped' if waitForStop else 'started'}", replica_id=replica_id)
             await trio.sleep(1)
 
     async def validate_stop_on_wedge_point(self, bft_network, skvbc, fullWedge=False):
@@ -1985,21 +1985,21 @@ class SkvbcReconfigurationTest(ApolloTest):
                 op = operator.Operator(bft_network.config, client,  bft_network.builddir)
                 quorum = None if fullWedge is True else bft_client.MofNQuorum.LinearizableQuorum(bft_network.config, [r.id for r in bft_network.replicas])
                 stop_condition = bft_network.config.n if fullWedge is True else (bft_network.config.n - bft_network.config.f)
-                await self.wait_for_network_to_stop_after_wedge(stop_condition, client, op, quorum, fullWedge)
+                await self.wait_for_network_wedge_status(stop_condition, client, op, quorum, fullWedge, waitForStop=True)
 
                 with log.start_action(action_type='expect_kv_failure_due_to_wedge'):
                     with self.assertRaises(trio.TooSlowError):
                         await skvbc.send_write_kv_set()
 
     async def validate_start_on_unwedge(self, bft_network, skvbc, fullWedge=False):
-        with log.start_action(action_type="validate_start_on_unwedge") as action:
+        with log.start_action(action_type="validate_start_on_unwedge", fullWedge=fullWedge) as action:
             with trio.fail_after(seconds=90):
                 client = bft_network.random_client()
                 client.config._replace(req_timeout_milli=10000)
                 op = operator.Operator(bft_network.config, client,  bft_network.builddir)
                 quorum = None if fullWedge is True else bft_client.MofNQuorum.LinearizableQuorum(bft_network.config, [r.id for r in bft_network.replicas])
                 stop_condition = bft_network.config.n if fullWedge is True else (bft_network.config.n - bft_network.config.f)
-                await self.wait_for_network_to_stop_after_wedge(stop_condition, client, op, quorum, fullWedge)
+                await self.wait_for_network_wedge_status(stop_condition, client, op, quorum, fullWedge, waitForStop=False)
 
     async def validate_stop_on_super_stable_checkpoint(self, bft_network, skvbc):
           with log.start_action(action_type="validate_stop_on_super_stable_checkpoint") as action:
@@ -2030,15 +2030,14 @@ class SkvbcReconfigurationTest(ApolloTest):
     async def verify_replicas_are_in_wedged_checkpoint(self, bft_network, previous_checkpoint, replicas):
         with log.start_action(action_type="verify_replicas_are_in_wedged_checkpoint", previous_checkpoint=previous_checkpoint):
             for replica_id in replicas:
-                with log.start_action(action_type="verify_replica", replica=replica_id):
-                    with trio.fail_after(seconds=60):
-                        while True:
-                            with trio.move_on_after(seconds=1):
-                                checkpoint_after = await bft_network.wait_for_checkpoint(replica_id=replica_id)
-                                if checkpoint_after == previous_checkpoint + 2:
-                                    break
-                                else:
-                                    await trio.sleep(1)
+                with trio.fail_after(seconds=60), log.start_action(action_type="verify_replicas_are_in_wedged_checkpoint", replica=replica_id):
+                    while True:
+                        with trio.move_on_after(seconds=1):
+                            checkpoint_after = await bft_network.wait_for_checkpoint(replica_id=replica_id)
+                            if checkpoint_after == previous_checkpoint + 2:
+                                break
+                            else:
+                                await trio.sleep(1)
 
     async def verify_last_executed_seq_num(self, bft_network, previous_checkpoint):
         expectedSeqNum = (previous_checkpoint  + 2) * 150

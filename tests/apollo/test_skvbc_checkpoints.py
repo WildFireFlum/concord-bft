@@ -320,7 +320,7 @@ class SkvbcCheckpointTest(ApolloTest):
                 self.assertEqual(current_view, expected_next_primary)
 
             # send sufficient number of client requests to trigger checkpoint protocol
-            # verify checkpoint propagation to all the nodes except the the initial primary
+            # verify checkpoint propagation to all the nodes except the initial primary
             await skvbc.fill_and_wait_for_checkpoint(
                 initial_nodes=bft_network.all_replicas(without={initial_primary}),
                 num_of_checkpoints_to_add=1,

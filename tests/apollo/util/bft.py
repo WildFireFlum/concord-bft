@@ -34,6 +34,7 @@ import re
 import trio
 
 from util.test_base import repeat_test
+from util.consts import CHECKPOINT_SEQUENCES
 
 sys.path.append(os.path.abspath("../../util/pyclient"))
 
@@ -483,7 +484,6 @@ class BftTestNetwork:
                 # Generate certificates for replicas, clients, and reserved clients
                 self.generate_tls_certs(self.num_total_replicas() + config.num_clients + RESERVED_CLIENTS_QUOTA + generate_cre, use_unified_certs=use_unified_certs)
 
-    @log_call
     def restart_clients(self, generate_tx_signing_keys=True, restart_replicas=True):
         with log.start_action(action_type="restart_clients", generate_tx_signing_keys=generate_tx_signing_keys,
                               restart_replicas=restart_replicas):
@@ -1274,7 +1274,15 @@ class BftTestNetwork:
         """
         with log.start_action(action_type="wait_for_fetching_state", replica=replica_id) as action:
             async def replica_to_be_in_fetching_state():
-                is_fetching = await self.is_fetching(replica_id)
+                has_metric = False
+                while not has_metric:
+                    try:
+                        is_fetching = await self.is_fetching(replica_id)
+                        has_metric = True
+                    except KeyError:
+                        # If a replica was down, the metric server might be up prior to the replica
+                        # registering its state transfer related metrics
+                        pass
                 source_replica_id = await self.source_replica(replica_id)
                 if is_fetching:
                     action.add_success_fields(source_replica_id=source_replica_id)
@@ -1310,7 +1318,8 @@ class BftTestNetwork:
                                            nursery.cancel_scope)
 
     async def wait_for_replicas_to_collect_stable_checkpoint(self, replicas, checkpoint, timeout=30):
-        with log.start_action(action_type="wait_for_replicas_to_collect_stable_checkpoint", replicas=replicas) as action:
+        with log.start_action(action_type="wait_for_replicas_to_collect_stable_checkpoint", replicas=replicas,
+                              checkpoint=checkpoint) as action:
             with trio.fail_after(seconds=timeout):
                 last_stable_seqs = []
                 while True:
@@ -1319,7 +1328,7 @@ class BftTestNetwork:
                         last_stable_seqs.append(last_stable)
                         action.log(message_type="lastStableSeqNum", replica=replica_id, last_stable=last_stable)
                     assert checkpoint >= last_stable / 150, "Probably got wrong checkpoint as input"
-                    if sum(x == 150 * checkpoint for x in last_stable_seqs) == len(replicas):
+                    if sum(x >= 150 * checkpoint for x in last_stable_seqs) == len(replicas):
                         break
                     else:
                         last_stable_seqs.clear()
@@ -1358,26 +1367,30 @@ class BftTestNetwork:
                         with trio.move_on_after(.5): # seconds
                             metrics = await self.metrics.get_all(stale_node)
                             try:
-                                n = self.metrics.get_local(metrics, *key)
+                                stale_node_metric = self.metrics.get_local(metrics, *key)
                             except KeyError:
                                 # ignore - the metric will eventually become available
                                 await trio.sleep(0.1)
                             else:
                                 # Debugging
-                                if n != last_n:
-                                    last_n = n
+                                if stale_node_metric != last_n:
+                                    last_n = stale_node_metric
                                     last_stored_checkpoint = self.metrics.get_local(metrics,
                                         'bc_state_transfer', 'Gauges', 'last_stored_checkpoint')
                                     on_transferring_complete = self.metrics.get_local(metrics,
                                         'bc_state_transfer', 'Counters', 'on_transferring_complete')
                                     action.log(message_type="Not complete yet",
-                                               seq_num=n, expected_seq_num=expected_seq_num,
+                                               seq_num=stale_node_metric, expected_seq_num=expected_seq_num,
                                                last_stored_checkpoint=last_stored_checkpoint,
                                                on_transferring_complete=on_transferring_complete)
+                                    log.log_message(message_type="Not complete yet",
+                                                    seq_num=stale_node_metric, expected_seq_num=expected_seq_num,
+                                                    last_stored_checkpoint=last_stored_checkpoint,
+                                                    on_transferring_complete=on_transferring_complete)
 
-                                # Exit condition
-                                if n >= expected_seq_num:
-                                    action.add_success_fields(n=n, expected_seq_num=expected_seq_num)
+                                # Exit condition - make sure that same checkpoint as live replica is reached
+                                if (stale_node_metric // CHECKPOINT_SEQUENCES) == (expected_seq_num // CHECKPOINT_SEQUENCES):
+                                    action.add_success_fields(n=stale_node_metric, expected_seq_num=expected_seq_num)
                                     return
 
                                 await trio.sleep(0.5)
@@ -1488,11 +1501,10 @@ class BftTestNetwork:
 
             async def expected_checkpoint_to_be_reached():
                 key = ['bc_state_transfer', 'Gauges', 'last_stored_checkpoint']
-
                 last_stored_checkpoint = await self.retrieve_metric(replica_id, *key)
-                action.log(message_type=f'[checkpoint] #{last_stored_checkpoint}, replica=#{replica_id}')
 
                 if last_stored_checkpoint is not None and expected_checkpoint_num(last_stored_checkpoint):
+                    action.log(message_type=f'[checkpoint] #{last_stored_checkpoint} reached by replica=#{replica_id}')
                     action.add_success_fields(last_stored_checkpoint=last_stored_checkpoint)
                     return last_stored_checkpoint
 
@@ -1667,18 +1679,16 @@ class BftTestNetwork:
            returns None before interval expires. This only matters in that it
            uses more CPU.
         """
-        with log.start_action(action_type="wait_for"):
-            with trio.fail_after(timeout):
-                while True:
-                    with trio.move_on_after(interval):
-                        if inspect.iscoroutinefunction(task):
-                            result = await task()
-                            if result is not None:
-                                return result
-                            else:
-                                await trio.sleep(0.1)
-                        else:
-                            raise TypeError
+        assert inspect.iscoroutinefunction(task)
+        with trio.fail_after(timeout):
+            while True:
+                with trio.move_on_after(interval):
+                    result = await task()
+                    if result is not None:
+                        return result
+                    else:
+                        await trio.sleep(0.1)
+
 
     async def retrieve_metric(self, replica_id, component_name, type_, key):
         try:
@@ -1959,7 +1969,8 @@ class BftTestNetwork:
 
 
     async def wait_for_stable_checkpoint(self, replicas, stable_seqnum):
-        with trio.fail_after(seconds=30):
+        with trio.fail_after(seconds=30), log.start_action(action_type="wait_for_stable_checkpoint",
+                                                           replicas=replicas, stable_seqnum=stable_seqnum):
             all_in_checkpoint = False
             while all_in_checkpoint is False:
                 all_in_checkpoint = True
@@ -1987,22 +1998,22 @@ class BftTestNetwork:
                     break
 
     def db_snapshot_exists(self, replica_id, snapshot_id=None):
-        with log.start_action(action_type="db_snapshot_exists()"):
-            snapshot_db_dir = os.path.join(
-                self.testdir, DB_SNAPSHOT_PREFIX + str(replica_id))
-            if snapshot_id is not None:
-                snapshot_db_dir = os.path.join(snapshot_db_dir, str(snapshot_id))
-            if not os.path.exists(snapshot_db_dir):
-                return False
+        snapshot_db_dir = os.path.join(
+            self.testdir, DB_SNAPSHOT_PREFIX + str(replica_id))
+        if snapshot_id is not None:
+            snapshot_db_dir = os.path.join(snapshot_db_dir, str(snapshot_id))
+        if not os.path.exists(snapshot_db_dir):
+            return False
 
-            # Make sure that checkpoint folder is not empty.
-            size = 0
-            for element in os.scandir(snapshot_db_dir):
-                size += os.path.getsize(element)
-            return (size > 0)
+        # Make sure that checkpoint folder is not empty.
+        size = 0
+        for element in os.scandir(snapshot_db_dir):
+            size += os.path.getsize(element)
+        return (size > 0)
 
     async def wait_for_db_snapshot(self, replica_id, snapshot_id=None):
-        with trio.fail_after(seconds=30):
+        with trio.fail_after(seconds=30), log.start_action(action_type="wait_for_db_snapshot", replica_id=replica_id,
+                                                           snapshot_id=snapshot_id):
             while True:
                 if self.db_snapshot_exists(replica_id, snapshot_id) == True:
                     break
