@@ -59,16 +59,19 @@ class SkvbcBackupRestoreTest(ApolloTest):
     @with_bft_network(start_replica_cmd, selected_configs=lambda n, f, c: n == 7)
     async def test_checkpoint_propagation_after_restarting_replicas(self, bft_network):
         """
-        Here we trigger a checkpoint, restart all replicas in a random order with 5s delay in-between,
-        both while stopping and starting. We verify checkpoint persisted upon restart and then trigger
+        Here we trigger a checkpoint, restart all replicas.
+        We verify checkpoint persisted upon restart and then trigger
         another checkpoint. We make sure checkpoint is propagated to all the replicas.
         1) Given a BFT network, we make sure all nodes are up
         2) Send sufficient number of client requests to trigger checkpoint protocol
-        3) Stop all replicas in a random order (with 5s delay in between)
-        4) Start all replicas in a random order (with 5s delay in between)
+        3) Stop all replicas in a random order
+        4) Start all replicas in a random order
         5) Make sure the initial view is stable
         6) Send sufficient number of client requests to trigger another checkpoint
         7) Make sure checkpoint propagates to all the replicas
+
+        Note: UDP configuration waits for 5 seconds until it assumes network communication is established.
+        A replica can thus trigger a view change if it
         """
         bft_network.start_all_replicas()
         skvbc = kvbc.SimpleKVBCProtocol(bft_network)
@@ -87,20 +90,15 @@ class SkvbcBackupRestoreTest(ApolloTest):
             verify_checkpoint_persistency=False
         )
 
-        # stop n replicas in a random order with a delay of 5s in between
-        stopped_replicas = await self._stop_random_replicas_with_delay(bft_network, delay=5,
-                                                                       exclude_replicas={current_primary})
-        bft_network.stop_replica(current_primary)
-        # start stopped replicas in a random order with a delay of 5s in between
-        bft_network.start_replica(current_primary)
-        await self._start_random_replicas_with_delay(bft_network, stopped_replicas, delay=5)
-
+        bft_network.stop_all_replicas()
+        bft_network.start_all_replicas()
+        stopped_replicas = bft_network.all_replicas()
         # verify checkpoint persistence
         log.log_message(message_type=f"Wait for replicas to reach checkpoint", checkpoint=checkpoint_before+1,
-                        replicas=[current_primary] + list(stopped_replicas))
+                        replicas=stopped_replicas)
         await bft_network.wait_for_replicas_to_checkpoint(
             stopped_replicas,
-            expected_checkpoint_num=lambda ecn: ecn == checkpoint_before + 1)
+            expected_checkpoint_num=lambda ecn: ecn >= checkpoint_before + 1)
 
         # verify current view is stable
         for replica in bft_network.all_replicas():

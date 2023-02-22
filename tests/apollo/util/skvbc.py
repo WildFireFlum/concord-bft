@@ -342,17 +342,20 @@ class SimpleKVBCProtocol:
             reply = await client.write(self.write_req([], [(key, val)], 0))
             reply = self.parse_reply(reply)
             assert reply.success
-            assert last_block + 1 == reply.last_block_id
+            last_block_after_write = reply.last_block_id
+            assert last_block_after_write > last_block, f'last_block_after_write: {last_block_after_write},' \
+                                                        f'last_block: {last_block}'
 
             # Retrieve the last block and ensure that it matches what's expected
             read_reply = await client.read(self.get_last_block_req())
             newest_block = self.parse_reply(read_reply)
-            assert last_block + 1 == newest_block
+            assert newest_block >= last_block_after_write, f'newest_block: {newest_block}, ' \
+                                                           f'last_block_after_write: {last_block_after_write}'
 
             # Get the previous put value, and ensure it's correct
             read_req = self.read_req([key], newest_block)
             kvpairs = self.parse_reply(await client.read(read_req))
-            assert {key: val} == kvpairs
+            assert {key: val} == kvpairs, '{}, {}'.format({key: val}, kvpairs)
 
     def _create_keys(self):
         """

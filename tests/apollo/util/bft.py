@@ -797,6 +797,7 @@ class BftTestNetwork:
                             f"return code = {return_code}"
                 log_message(message_type=f"{error_msg}, aborting test", replica_log=stdout_file.name)
                 stdout_file.write(f"####### FATAL ERROR: The process has crashed, subproc return value: {return_code}\n")
+                print(error_msg, file=sys.stderr)
                 os.kill(os.getpid(), signal.SIGINT)
                 break
 

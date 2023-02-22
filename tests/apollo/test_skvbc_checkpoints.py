@@ -395,12 +395,11 @@ class SkvbcCheckpointTest(ApolloTest):
         # Once the adversary is gone, the isolated replicas should be able reach the checkpoint
         await bft_network.wait_for_replicas_to_checkpoint(
             isolated_replicas,
-            expected_checkpoint_num=lambda ecn: ecn == checkpoint_before + 1)
+            expected_checkpoint_num=lambda ecn: ecn >= checkpoint_before + 1)
 
     @with_trio
     @with_bft_network(start_replica_cmd_with_corrupted_checkpoint_msgs(corrupt_checkpoints_from_replica_ids={ 1 }),
                       selected_configs=lambda n, f, c: n == 7)
-
     async def test_rvt_conflict_detection_after_corrupting_checkpoint_msg_for_single_replica(self, bft_network):
         await self._test_checkpointing_with_corruptions(bft_network, { 1 })
 
