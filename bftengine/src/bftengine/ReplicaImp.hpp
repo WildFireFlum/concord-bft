@@ -625,6 +625,7 @@ class ReplicaImp : public InternalReplicaApi, public ReplicaForStateTransfer {
   void addTimers();
   void startConsensusProcess(PrePrepareMsg* pp, bool isCreatedEarlier);
   void startConsensusProcess(PrePrepareMsg* pp);
+  void clearClientRequestQueue();
   /**
    * Updates both seqNumInfo and slow_path metric
    * @param seqNumInfo
