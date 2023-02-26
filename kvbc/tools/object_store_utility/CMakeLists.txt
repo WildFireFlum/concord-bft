@@ -3,7 +3,7 @@ if (USE_S3_OBJECT_STORE)
 project(object_store_utility LANGUAGES CXX )
 find_package(Boost ${MIN_BOOST_VERSION} COMPONENTS program_options REQUIRED)
 
-add_library(libobject_store integrity_checker.cpp db_restore.cpp)
+add_library(libobject_store integrity_checker.cpp db_restore.cpp )
 target_link_libraries(libobject_store PUBLIC kvbc util Boost::program_options)
 
 add_executable(object_store_utility main.cpp) 

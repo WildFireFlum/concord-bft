@@ -60,10 +60,11 @@ inline void printCallStack() {
           free(ret);
         }
       }
-      LOG_FATAL(GL, "\n" << os.str());
+      LOG_INFO(GL, "\n" << os.str());
       std::free(symbolsList);
     }
   }
+  return;
 }
 
 #define PRINT_DATA_AND_ASSERT_BOOL_EXPR(expr1, expr2, assertMacro)                                                 \

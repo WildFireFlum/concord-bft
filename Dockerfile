@@ -25,7 +25,7 @@ path-exclude /usr/share/linda/*' > /etc/dpkg/dpkg.cfg.d/01_nodoc && \
         /bin/bash -c "/install_deps.sh" && \
         apt-get clean && \
         apt-get autoclean && \
-        rm -rf /var/lib/apt/lists/* 
+        rm -rf /var/lib/apt/lists/*
 
 # For eliot-tree's rendering
 ENV LC_ALL=C.UTF-8

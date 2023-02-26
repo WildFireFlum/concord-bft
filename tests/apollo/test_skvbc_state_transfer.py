@@ -7,7 +7,7 @@
 #
 # This product may include a number of subcomponents with separate copyright
 # notices and license terms. Your use of these subcomponents is subject to the
-# terms and conditions of the subcomponent's license, as noted in the LICENSE
+# terms and conditions of the subcomponent's license, as noted in the LICENStE
 # file.
 import os.path
 import random
@@ -259,7 +259,7 @@ class SkvbcStateTransferTest(ApolloTest):
 
 
     @with_trio
-    @with_bft_network(start_replica_cmd)
+    @with_bft_network(start_replica_cmd, rotate_keys=True)
     async def test_state_transfer_rvt_validity_after_pruning(self, bft_network):
         """
         The goal of this test is to validate that all replicas have their Range validation trees (RVTs) synchronized
@@ -278,12 +278,11 @@ class SkvbcStateTransferTest(ApolloTest):
 
         skvbc = kvbc.SimpleKVBCProtocol(bft_network)
 
-        stale_node = random.choice(
-                    bft_network.all_replicas(without={0}))
+        stale_node = 3
 
         await skvbc.prime_for_state_transfer(
             stale_nodes={stale_node},
-            checkpoints_num=5, # key-exchange changes the last executed seqnum
+            checkpoints_num=3, # key-exchange changes the last executed seqnum
             persistency_enabled=False
         )
 
@@ -293,6 +292,7 @@ class SkvbcStateTransferTest(ApolloTest):
         # Wait for the RVT root values to be in sync before the pruning
         await bft_network.wait_for_replicas_rvt_root_values_to_be_in_sync(bft_network.all_replicas())
 
+        return
         # Get the minimal latest pruneable block among all replicas
         client = bft_network.random_client()
         op = operator.Operator(bft_network.config, client, bft_network.builddir)

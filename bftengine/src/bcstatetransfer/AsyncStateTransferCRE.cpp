@@ -21,6 +21,7 @@
 #include "bftclient/bft_client.h"
 #include "ControlStateManager.hpp"
 #include "reconfiguration/ireconfiguration.hpp"
+#include "CryptoManager.hpp"
 
 namespace bftEngine::bcst::asyncCRE {
 using namespace concord::client::reconfiguration;
@@ -71,15 +72,7 @@ class Communication : public ICommunication {
   uint16_t repId_;
 };
 
-class InternalSigner : public concord::crypto::ISigner {
- public:
-  size_t signBuffer(const concord::Byte* dataIn, size_t dataLen, concord::Byte* sigOutBuffer) override {
-    return bftEngine::impl::SigManager::instance()->sign(dataIn, dataLen, sigOutBuffer);
-  }
-
-  size_t signatureLength() const override { return bftEngine::impl::SigManager::instance()->getMySigLength(); }
-  std::string getPrivKey() const override { return ""; }
-};
+// Implement cryptomanager update handler
 
 class ScalingReplicaHandler : public IStateHandler {
  public:
@@ -120,11 +113,11 @@ class ScalingReplicaHandler : public IStateHandler {
     if (!configuration_file.good()) {
       LOG_FATAL(getLogger(), "unable to open the reconfigurations file");
     }
-    configuration_file << (command.config_descriptor + "\n");
-    configuration_file.close();
     LOG_INFO(getLogger(), "getting new configuration");
     bftEngine::ControlStateManager::instance().getNewConfiguration(command.config_descriptor, command.token);
     bftEngine::ControlStateManager::instance().markRemoveMetadata();
+    configuration_file << (command.config_descriptor + "\n");
+    configuration_file.close();
     LOG_INFO(getLogger(), "completed scaling procedure for " << command.config_descriptor << " restarting the replica");
     if (command.restart) bftEngine::ControlStateManager::instance().restart();
     return true;
@@ -136,8 +129,41 @@ class ScalingReplicaHandler : public IStateHandler {
     return logger_;
   }
 };
-std::shared_ptr<ClientReconfigurationEngine> CreFactory::create(std::shared_ptr<MsgsCommunicator> msgsCommunicator,
-                                                                std::shared_ptr<MsgHandlersRegistrator> msgHandlers) {
+
+// TODO(yf): remove
+class MainKeyUpdateHandler : public IStateHandler {
+ public:
+  MainKeyUpdateHandler() { LOG_INFO(getLogger(), "Created StateTransfer CRE replica main key update handler"); }
+  bool validate(const State& state) const override {
+    concord::messages::ClientStateReply crep;
+    concord::messages::deserialize(state.data, crep);
+    if (std::holds_alternative<concord::messages::ReplicaMainKeyUpdate>(crep.response)) {
+      concord::messages::ReplicaMainKeyUpdate update = std::get<concord::messages::ReplicaMainKeyUpdate>(crep.response);
+      return true;
+    }
+    return false;
+  }
+
+  bool execute(const State& state, WriteState&) override {
+    LOG_INFO(getLogger(), "execute MainKeyUpdateHandler");
+    concord::messages::ClientStateReply crep;
+    concord::messages::deserialize(state.data, crep);
+    concord::messages::ReplicaMainKeyUpdate update = std::get<concord::messages::ReplicaMainKeyUpdate>(crep.response);
+    bftEngine::CryptoManager::instance().onPublicKeyExchange(update.key, update.sender_id, update.seq_num);
+    return true;
+  }
+
+ private:
+  logging::Logger getLogger() {
+    static logging::Logger logger_(logging::getLogger("bftEngine::bcst::asyncCRE.MainKeyUpdateHandler"));
+    return logger_;
+  }
+};
+
+std::shared_ptr<ClientReconfigurationEngine> CreFactory::create(
+    std::shared_ptr<MsgsCommunicator> msgsCommunicator,
+    std::shared_ptr<MsgHandlersRegistrator> msgHandlers,
+    std::unique_ptr<concord::crypto::ISigner> transactionSigner) {
   bft::client::ClientConfig bftClientConf;
   auto& repConfig = bftEngine::ReplicaConfig::instance();
   bftClientConf.f_val = repConfig.fVal;
@@ -152,14 +178,31 @@ std::shared_ptr<ClientReconfigurationEngine> CreFactory::create(std::shared_ptr<
   bftClientConf.replicas_master_key_folder_path = std::nullopt;
   std::unique_ptr<ICommunication> comm = std::make_unique<Communication>(msgsCommunicator, msgHandlers);
   bft::client::Client* bftClient = new bft::client::Client(std::move(comm), bftClientConf);
-  bftClient->setTransactionSigner(new InternalSigner());
+  bftClient->setTransactionSigner(transactionSigner.release());
   Config cre_config;
   cre_config.id_ = repConfig.replicaId;
   cre_config.interval_timeout_ms_ = 1000;
-  IStateClient* pbc = new PollBasedStateClient(bftClient, cre_config.interval_timeout_ms_, 0, cre_config.id_);
+  // TODO: fix relying on f + 1, so that byzantine replicas are also handled
+  IStateClient* pbc = new PollBasedStateClient(bftClient, cre_config.interval_timeout_ms_, 0, cre_config.id_, true);
   auto cre =
       std::make_shared<ClientReconfigurationEngine>(cre_config, pbc, std::make_shared<concordMetrics::Aggregator>());
-  if (!bftEngine::ReplicaConfig::instance().isReadOnly) cre->registerHandler(std::make_shared<ScalingReplicaHandler>());
+  if (bftEngine::ReplicaConfig::instance().isReadOnly) {
+    cre->registerHandler(std::make_shared<MainKeyUpdateHandler>());
+  } else {
+    cre->registerHandler(std::make_shared<ScalingReplicaHandler>());
+  }
   return cre;
 }
+
+size_t ReplicaCRESigner::signBuffer(const concord::Byte* dataIn, size_t dataLen, concord::Byte* sigOutBuffer) const {
+  LOG_DEBUG(GL, "ReplicaCRESigner signing");
+  auto* sigManager = bftEngine::impl::SigManager::instance();
+  return sigManager->sign(sigManager->getReplicaLastExecutedSeq(), dataIn, dataLen, sigOutBuffer);
+}
+
+size_t ReplicaCRESigner::signatureLength() const {
+  return bftEngine::impl::SigManager::instance()->getLastReplicaSigner()->signatureLength();
+}
+std::string ReplicaCRESigner::getPrivKey() const { ConcordAssert(false); }
+
 }  // namespace bftEngine::bcst::asyncCRE
